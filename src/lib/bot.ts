@@ -336,7 +336,29 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (event.type === "contact") {
-    return reduceBot(step, draft, { type: "text", text: event.phone });
+    const phone = formatPhone(event.phone);
+    if (!isValidUzPhone(event.phone) && event.phone.replace(/\D/g, "").length < 8) {
+      return {
+        userMessage: user(event.phone),
+        replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
+        step: step === "master_phone" ? "master_phone" : "phone",
+        draft,
+      };
+    }
+    if (step === "master_phone" || step === "master_geo" || (draft.role === "master" && step !== "category")) {
+      return {
+        userMessage: user(phone),
+        replies: [bot(t(lang, "masterGeo"), { buttons: [[{ id: "geo:share", label: t(lang, "shareGeo"), requestLocation: true }]] })],
+        step: "master_geo",
+        draft: { ...draft, phone },
+      };
+    }
+    return {
+      userMessage: user(phone),
+      replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
+      step: "comment",
+      draft: { ...draft, phone },
+    };
   }
 
   if (event.type === "photo") {

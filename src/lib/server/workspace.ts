@@ -177,7 +177,7 @@ export async function addNote(sql: Sql, userId: string, kind: string, title: str
     insert into as_notifications (user_id, kind, title, body, order_id, master_id)
     values (${userId}, ${kind}, ${title}, ${body}, ${orderId}, ${masterId})
   `;
-  void pushLog(sql, userId, `🔔 ${title}\n${body}`);
+  await pushLog(sql, userId, `🔔 ${title}\n${body}`);
 }
 
 async function pushLog(sql: Sql, userId: string, text: string) {

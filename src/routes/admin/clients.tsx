@@ -27,7 +27,7 @@ function ClientsPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl">Клиенты</h1>
-          <p className="text-sm text-muted">Телефон, гео, язык и роль приходят из бота. Удалить не блокирует — только стирает контакт.</p>
+          <p className="text-sm text-muted">Телефон и гео из бота. «Удалить» убирает из списка (заявки в архиве остаются).</p>
         </div>
         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Поиск" className="max-w-xs" />
       </div>

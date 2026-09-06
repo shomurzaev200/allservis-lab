@@ -159,7 +159,8 @@ function SettingsPage() {
         </p>
         {addLogs.data && !addLogs.data.ok ? <p className="text-sm text-danger">{addLogs.data.error}</p> : null}
         {addLogs.data?.ok ? <p className="text-sm text-ok">Бот алертов @{addLogs.data.username} подключён.</p> : null}
-        {reqs.data?.ok ? <p className="text-sm text-ok">ID канала сохранён.</p> : null}
+        {reqs.data?.ok ? <p className="text-sm text-ok">Тест ушёл в канал — проверьте Telegram.</p> : null}
+        {reqs.data && !reqs.data.ok ? <p className="text-sm text-danger">{reqs.data.error}</p> : null}
         <div className="flex flex-wrap gap-2">
           <Button disabled={!logToken || addLogs.isPending} onClick={() => addLogs.mutate()}>
             {addLogs.isPending ? "Подключаю…" : "Подключить бота алертов"}

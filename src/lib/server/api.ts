@@ -264,6 +264,7 @@ export const listClients = createServerFn({ method: "GET" })
       from as_clients cl
       left join as_orders o on o.client_id = cl.id
       where cl.user_id = ${uid}
+        and not (cl.name = ${"Удалён"} and cl.telegram_id is null)
       group by cl.id
       order by cl.created_at desc`;
   });
@@ -617,12 +618,19 @@ export const deleteClient = createServerFn({ method: "POST" })
     requireAdmin(actor);
     const row = await sql<{ name: string }>`select name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
-    await sql`
-      update as_clients
-      set name = ${"Удалён"}, phone = ${""}, telegram_id = ${null}, blocked = ${false}, paid = ${false}
-      where user_id = ${uid} and id = ${data.id}
-    `;
-    await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, "anonymized");
+    const orders = await sql<{ n: number }>`select count(*)::int as n from as_orders where user_id = ${uid} and client_id = ${data.id}`;
+    if (!n(orders[0]?.n)) {
+      try { await sql`delete from as_payments where user_id = ${uid} and client_id = ${data.id}`; } catch { /* ignore */ }
+      try { await sql`delete from as_reviews where user_id = ${uid} and client_id = ${data.id}`; } catch { /* ignore */ }
+      await sql`delete from as_clients where user_id = ${uid} and id = ${data.id}`;
+    } else {
+      await sql`
+        update as_clients
+        set name = ${"Удалён"}, phone = ${""}, telegram_id = ${null}, blocked = ${false}, paid = ${false}
+        where user_id = ${uid} and id = ${data.id}
+      `;
+    }
+    await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, "removed");
     return { ok: true as const, error: null };
   });
 
@@ -720,7 +728,9 @@ export const saveRequisites = createServerFn({ method: "POST" })
     requireAdmin(actor);
     const channel = (data.channel ?? "").replace(/^@/, "").trim();
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
-    const alerts = (data.alertsChannel ?? "").trim();
+    const rawAlerts = (data.alertsChannel ?? "").trim();
+    const m = rawAlerts.match(/-100\d{8,14}/);
+    const alerts = m ? m[0] : rawAlerts.replace(/\s+/g, "");
     await sql`
       update as_workspace set
         channel_username = ${channel || null},
@@ -737,20 +747,18 @@ export const saveRequisites = createServerFn({ method: "POST" })
         select bot_token from as_bots where user_id = ${uid} and kind = ${"logs"} and bot_token is not null limit 1
       `;
       if (log[0]?.bot_token) {
-        try {
-          await fetch(`https://api.telegram.org/bot${log[0].bot_token}/sendMessage`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({
-              chat_id: Number(alerts),
-              text: "All Servis: алерты подключены к этому каналу.",
-            }),
-          });
-        } catch { /* ignore */ }
+        const { sendAlertTest } = await import("./telegram");
+        const sent = await sendAlertTest(log[0].bot_token, alerts);
+        if (!sent.ok) {
+          return {
+            ok: false as const,
+            error: `${sent.error}. Добавьте бота алертов админом канала (право писать сообщения).`,
+          };
+        }
       }
     }
     await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
-    return { ok: true as const };
+    return { ok: true as const, error: null as string | null };
   });
 
 export const listPayments = createServerFn({ method: "GET" })

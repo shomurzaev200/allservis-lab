@@ -301,6 +301,16 @@ export async function disconnectBotById(sql: Sql, userId: string, botId: number)
   }
 }
 
+function chatTarget(raw: string): string | number {
+  const s = raw.trim();
+  const m = s.match(/-100\d{8,14}/);
+  if (m) return Number(m[0]);
+  if (s.startsWith("@") && s.length > 2) return s;
+  const n = Number(s);
+  if (Number.isFinite(n) && n !== 0) return n;
+  return s;
+}
+
 export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
   const targets = new Set<string>();
   const bots = await sql<{ bot_token: string | null; log_chat_id: string | null }>`
@@ -310,20 +320,28 @@ export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
   let token: string | null = null;
   for (const b of bots) {
     if (b.bot_token) token = b.bot_token;
-    if (b.log_chat_id) targets.add(b.log_chat_id);
+    if (b.log_chat_id) targets.add(b.log_chat_id.trim());
   }
   try {
     const ws = await sql<{ alerts_channel_id: string | null }>`
       select alerts_channel_id from as_workspace where user_id = ${userId}
     `;
-    if (ws[0]?.alerts_channel_id) targets.add(ws[0].alerts_channel_id);
+    if (ws[0]?.alerts_channel_id) targets.add(ws[0].alerts_channel_id.trim());
   } catch { /* ignore */ }
-  if (!token) return;
+  if (!token || !targets.size) return;
   for (const chat of targets) {
     try {
-      await tg(token, "sendMessage", { chat_id: Number(chat), text: text.slice(0, 3500) });
+      await tg(token, "sendMessage", { chat_id: chatTarget(chat), text: text.slice(0, 3500) });
     } catch { /* ignore */ }
   }
+}
+
+export async function sendAlertTest(token: string, chat: string) {
+  const json = await tg(token, "sendMessage", {
+    chat_id: chatTarget(chat),
+    text: "All Servis: тест алерта. Если видите это — канал подключён.",
+  });
+  return { ok: json.ok, error: json.ok ? null : (json.description ?? "Telegram отклонил сообщение") };
 }
 
 export async function disconnectTelegramBot(sql: Sql, userId: string) {
