@@ -3,7 +3,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
-import { addAudit, addEvent, addNote, tickPresence } from "./workspace";
+import { addAudit, addEvent, addNote, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
 import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
@@ -49,6 +49,10 @@ function asBool(v: unknown): boolean {
 }
 
 const NO_PERM = "Нет права. Владелец не выдал это в «Команда».";
+
+function who(actor: { name: string; email: string; role: string }): StaffWho {
+  return { name: actor.name, email: actor.email, role: actor.role };
+}
 
 async function ensureCredentialUser(
   sql: Awaited<ReturnType<typeof getSql>>,
@@ -363,8 +367,8 @@ export const assignMaster = createServerFn({ method: "POST" })
     if (!master) return { success: false as const, error: "MASTER_NOT_FOUND" };
     if (String(master.online_status) === "blocked") return { success: false as const, error: "MASTER_BLOCKED" };
     await sql`update as_orders set master_id = ${data.masterId}, status = 'assigned', assigned_at = now(), updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
-    await addEvent(sql, uid, data.orderId, "assigned", "admin", { masterId: data.masterId });
-    await addAudit(sql, uid, "assign_master", "order", String(data.orderId), null, String(data.masterId));
+    await addEvent(sql, uid, data.orderId, "assigned", "admin", { masterId: data.masterId }, who(actor));
+    await addAudit(sql, uid, "assign_master", "order", String(data.orderId), null, String(data.masterId), who(actor));
     const name = `${master.first_name} ${master.last_name}`;
     await addNote(sql, uid, "master", `Вам назначен заказ №${order.public_no}`, String(order.description), data.orderId, data.masterId);
     await pushOrderStatus(sql, uid, data.orderId, "assigned", name);
@@ -378,7 +382,7 @@ export const cancelOrder = createServerFn({ method: "POST" })
     const { sql, uid, actor } = await ctxSql(context.userId);
     if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
     await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now() where user_id = ${uid} and id = ${orderId} and status <> 'completed'`;
-    await addEvent(sql, uid, orderId, "cancelled", "admin", {});
+    await addEvent(sql, uid, orderId, "cancelled", "admin", {}, who(actor));
     await pushOrderStatus(sql, uid, orderId, "cancelled", null);
     return { success: true };
   });
@@ -650,15 +654,18 @@ export const listStaff = createServerFn({ method: "GET" })
       const rows = await sql<{
         id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
         can_invite: boolean; can_delete: boolean; can_assign: boolean; can_finance: boolean; can_bots: boolean;
+        last_seen: string | null;
       }>`
         select id, user_id, email, name, role, blocked, created_at,
           coalesce(can_invite, false) as can_invite,
           coalesce(can_delete, false) as can_delete,
           coalesce(can_assign, false) as can_assign,
           coalesce(can_finance, false) as can_finance,
-          coalesce(can_bots, false) as can_bots
+          coalesce(can_bots, false) as can_bots,
+          last_seen
         from as_staff where workspace_id = ${uid} order by role asc, created_at asc
       `;
+      const now = Date.now();
       return rows.map((r) => ({
         ...r,
         can_invite: asBool(r.can_invite),
@@ -666,12 +673,14 @@ export const listStaff = createServerFn({ method: "GET" })
         can_assign: asBool(r.can_assign),
         can_finance: asBool(r.can_finance),
         can_bots: asBool(r.can_bots),
+        last_seen: r.last_seen ? String(r.last_seen) : null,
+        online: Boolean(r.last_seen) && now - new Date(String(r.last_seen)).getTime() < 150_000,
       }));
     } catch {
       const rows = await sql<{
         id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
       }>`select id, user_id, email, name, role, blocked, created_at from as_staff where workspace_id = ${uid} order by role asc, created_at asc`;
-      return rows.map((r) => ({ ...r, can_invite: false, can_delete: false, can_assign: false, can_finance: false, can_bots: false }));
+      return rows.map((r) => ({ ...r, can_invite: false, can_delete: false, can_assign: false, can_finance: false, can_bots: false, last_seen: null as string | null, online: false }));
     }
   });
 
@@ -709,7 +718,7 @@ export const inviteStaff = createServerFn({ method: "POST" })
       insert into as_staff (workspace_id, user_id, email, name, role, blocked, can_invite, can_delete, can_assign, can_finance, can_bots)
       values (${uid}, ${authUserId}, ${email}, ${name}, ${"admin"}, ${false}, ${invite}, ${del}, ${assign}, ${finance}, ${bots})
     `;
-    await addAudit(sql, uid, "invite_staff", "staff", email, null, "admin");
+    await addAudit(sql, uid, "invite_staff", "staff", email, null, "admin", who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -725,7 +734,7 @@ export const setStaffBlocked = createServerFn({ method: "POST" })
     if (!row[0]) return { ok: false as const, error: "Пользователь не найден" };
     if (row[0].role === "owner") return { ok: false as const, error: "Владельца нельзя заблокировать" };
     await sql`update as_staff set blocked = ${data.blocked} where id = ${data.id} and workspace_id = ${uid}`;
-    await addAudit(sql, uid, data.blocked ? "block_staff" : "unblock_staff", "staff", String(data.id), null, row[0].email);
+    await addAudit(sql, uid, data.blocked ? "block_staff" : "unblock_staff", "staff", String(data.id), null, row[0].email, who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -741,7 +750,7 @@ export const deleteStaff = createServerFn({ method: "POST" })
     if (!row[0]) return { ok: false as const, error: "Пользователь не найден" };
     if (row[0].role === "owner") return { ok: false as const, error: "Владельца нельзя удалить" };
     await sql`delete from as_staff where workspace_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, "delete_staff", "staff", String(data.id), row[0].email, null);
+    await addAudit(sql, uid, "delete_staff", "staff", String(data.id), row[0].email, null, who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -755,7 +764,7 @@ export const setClientBlocked = createServerFn({ method: "POST" })
     const row = await sql<{ id: number; name: string }>`select id, name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
     await sql`update as_clients set blocked = ${data.blocked} where user_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, data.blocked ? "block_client" : "unblock_client", "client", String(data.id), null, row[0].name);
+    await addAudit(sql, uid, data.blocked ? "block_client" : "unblock_client", "client", String(data.id), null, row[0].name, who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -781,7 +790,7 @@ export const deleteClient = createServerFn({ method: "POST" })
       await sql`delete from as_tg_sessions where user_id = ${uid} and chat_id = ${tg[0].telegram_id}`;
     }
     await sql`delete from as_clients where user_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, "removed");
+    await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, "removed", who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -794,7 +803,7 @@ export const setMasterBlocked = createServerFn({ method: "POST" })
     if (!can(actor, "delete")) return { ok: false as const, error: NO_PERM };
     const status = data.blocked ? "blocked" : "offline";
     await sql`update as_masters set online_status = ${status} where user_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, data.blocked ? "block_master" : "unblock_master", "master", String(data.id), null, status);
+    await addAudit(sql, uid, data.blocked ? "block_master" : "unblock_master", "master", String(data.id), null, status, who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -811,7 +820,7 @@ export const deleteMaster = createServerFn({ method: "POST" })
     await sql`update as_orders set master_id = null where user_id = ${uid} and master_id = ${data.id}`;
     await sql`delete from as_notifications where user_id = ${uid} and master_id = ${data.id}`;
     await sql`delete from as_masters where user_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, "delete_master", "master", String(data.id), null, "removed");
+    await addAudit(sql, uid, "delete_master", "master", String(data.id), null, "removed", who(actor));
     return { ok: true as const, error: null };
   });
 
@@ -858,7 +867,7 @@ export const addServiceBot = createServerFn({ method: "POST" })
       data.kind,
       data.label?.trim() || (data.kind === "logs" ? "Логи" : "Клиентский бот"),
     );
-    if (result.ok) await addAudit(sql, uid, "connect_bot", "bot", data.kind, null, result.username);
+    if (result.ok) await addAudit(sql, uid, "connect_bot", "bot", data.kind, null, result.username, who(actor));
     return result;
   });
 
@@ -870,7 +879,7 @@ export const removeServiceBot = createServerFn({ method: "POST" })
     requireAdmin(actor);
     if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM };
     await disconnectBotById(sql, uid, data.id);
-    await addAudit(sql, uid, "remove_bot", "bot", String(data.id), null, null);
+    await addAudit(sql, uid, "remove_bot", "bot", String(data.id), null, null, who(actor));
     return { ok: true as const };
   });
 
@@ -914,13 +923,8 @@ export const saveRequisites = createServerFn({ method: "POST" })
     }
     if (alerts) {
       await sql`update as_bots set log_chat_id = ${alerts} where user_id = ${uid} and kind = ${"logs"}`;
-      const sent = await sendWorkspaceAlertTest(sql, uid, alerts);
-      if (!sent.ok) {
-        await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
-        return { ok: false as const, error: sent.error };
-      }
     }
-    await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
+    await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites", who(actor));
     return { ok: true as const, error: null as string | null };
   });
 
@@ -968,7 +972,7 @@ export const reviewPayment = createServerFn({ method: "POST" })
         await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and telegram_id = ${row[0].telegram_id}`;
       }
     }
-    await addAudit(sql, uid, data.approve ? "approve_pay" : "reject_pay", "payment", String(data.id), null, row[0].client_name);
+    await addAudit(sql, uid, data.approve ? "approve_pay" : "reject_pay", "payment", String(data.id), null, row[0].client_name, who(actor));
     const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
     const token = ws[0]?.bot_token;
     const chat = row[0].telegram_id;

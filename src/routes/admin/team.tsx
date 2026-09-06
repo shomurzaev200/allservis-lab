@@ -11,7 +11,7 @@ export const Route = createFileRoute("/admin/team")({ component: TeamPage });
 function TeamPage() {
   const qc = useQueryClient();
   const access = useAccess();
-  const { data = [], isPending } = useQuery({ queryKey: ["staff"], queryFn: () => listStaff() });
+  const { data = [], isPending } = useQuery({ queryKey: ["staff"], queryFn: () => listStaff(), refetchInterval: 15_000 });
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
@@ -95,12 +95,13 @@ function TeamPage() {
             <tr>
               <th className="px-3 py-3">Email</th>
               <th className="px-3 py-3">Права</th>
+              <th className="px-3 py-3">Сеть</th>
               <th className="px-3 py-3">Статус</th>
               <th className="px-3 py-3" />
             </tr>
           </thead>
           <tbody>
-            {isPending ? <tr><td className="px-3 py-6 text-muted" colSpan={4}>Загрузка…</td></tr> : null}
+            {isPending ? <tr><td className="px-3 py-6 text-muted" colSpan={5}>Загрузка…</td></tr> : null}
             {data.map((s) => (
               <tr key={s.id} className="border-t border-border">
                 <td className="px-3 py-3">
@@ -145,6 +146,20 @@ function TeamPage() {
                       ].filter(Boolean).join(" · ") || "без доп. прав"}
                     </span>
                   )}
+                </td>
+                <td className="px-3 py-3">
+                  {s.blocked ? (
+                    <span className="text-danger">офлайн</span>
+                  ) : s.online ? (
+                    <span className="text-ok">в сети</span>
+                  ) : (
+                    <span className="text-muted">не в сети</span>
+                  )}
+                  {s.last_seen && !s.blocked ? (
+                    <p className="text-[11px] text-subtle">
+                      {new Date(s.last_seen).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" })}
+                    </p>
+                  ) : null}
                 </td>
                 <td className="px-3 py-3">
                   {s.blocked ? <span className="text-danger">блок</span> : s.user_id ? <span className="text-ok">активен</span> : <span className="text-warn">ждёт вход</span>}

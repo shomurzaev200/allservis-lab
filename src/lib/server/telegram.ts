@@ -4,7 +4,7 @@ import { clientLabel, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
 import { emptyDraft, reduceBot, statusReply, clientMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
-import type { Sql } from "./workspace";
+import type { Sql, StaffWho } from "./workspace";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number };
@@ -116,7 +116,7 @@ const ORDER_CARD_SQL = `
   where o.user_id = $1 and o.id = $2
 `;
 
-function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "channel" | "master" = "channel"): string {
+function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "channel" | "master" = "channel", who?: StaffWho): string {
   const svc = serviceById(String(o.category_slug ?? ""));
   const distRaw = String(o.district ?? "");
   const dist = districtById(distRaw)?.title || distRaw || "—";
@@ -147,6 +147,14 @@ function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "c
     o.comment ? `💬 Комментарий: ${escHtml(String(o.comment))}` : "",
     `💰 Сумма: ${Number(o.price ?? 0).toLocaleString("ru-RU")} сум`,
   ];
+  if (who && role === "channel") {
+    const roleRu = who.role === "owner" ? "владелец" : "сотрудник";
+    lines.push(
+      "",
+      `👤 Сотрудник: <b>${escHtml(who.name || "—")}</b> · ${roleRu}`,
+      who.email ? `✉️ <code>${escHtml(who.email)}</code>` : "",
+    );
+  }
   if (masterName) {
     lines.push(
       "",
@@ -878,7 +886,7 @@ export async function pushWorkspaceLog(
             if (geo) {
               await tg(token, "sendLocation", { chat_id: r.used ?? chat, latitude: geo.lat, longitude: geo.lng });
             }
-            break;
+            return { ok: true, lastErr };
           }
           lastErr = r.description ?? lastErr;
         } catch (e) {
@@ -906,17 +914,59 @@ export async function pushWorkspaceLog(
   try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
 }
 
-export async function pushOrderChannelAlert(sql: Sql, userId: string, orderId: number, eventType: string) {
+export async function pushOrderChannelAlert(sql: Sql, userId: string, orderId: number, eventType: string, who?: StaffWho) {
   const o = await loadOrderCard(sql, userId, orderId);
   if (!o) return;
   const lat = o.lat == null ? null : Number(o.lat);
   const lng = o.lng == null ? null : Number(o.lng);
   const withGeo = eventType === "created" || eventType === "assigned";
-  await pushWorkspaceLog(sql, userId, formatOrderCard(o, eventType, "channel"), {
+  await pushWorkspaceLog(sql, userId, formatOrderCard(o, eventType, "channel", who), {
     parseMode: "HTML",
     lat: withGeo ? lat : null,
     lng: withGeo ? lng : null,
   });
+}
+
+const ACTION_RU: Record<string, string> = {
+  invite_staff: "Добавил сотрудника в команду",
+  block_staff: "Заблокировал сотрудника",
+  unblock_staff: "Разблокировал сотрудника",
+  delete_staff: "Удалил сотрудника",
+  block_client: "Заблокировал клиента",
+  unblock_client: "Разблокировал клиента",
+  delete_client: "Удалил клиента",
+  block_master: "Заблокировал мастера",
+  unblock_master: "Разблокировал мастера",
+  delete_master: "Удалил мастера",
+  connect_bot: "Подключил бота",
+  remove_bot: "Отключил бота",
+  save_requisites: "Изменил настройки / реквизиты / канал",
+  approve_pay: "Подтвердил оплату",
+  reject_pay: "Отклонил оплату",
+  cancelled: "Отменил заявку",
+};
+
+export async function pushStaffActionAlert(
+  sql: Sql,
+  userId: string,
+  payload: {
+    action: string; objectType: string; objectId: string;
+    oldValue: string | null; newValue: string | null; who: StaffWho;
+  },
+) {
+  const when = new Date().toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" });
+  const title = ACTION_RU[payload.action] || payload.action;
+  const roleRu = payload.who.role === "owner" ? "владелец" : "сотрудник";
+  const text = [
+    `<b>🛡 ${escHtml(title)}</b>`,
+    `👤 <b>${escHtml(payload.who.name || "—")}</b> · ${roleRu}`,
+    payload.who.email ? `✉️ <code>${escHtml(payload.who.email)}</code>` : "",
+    `🕐 ${escHtml(when)}`,
+    payload.objectType ? `Объект: ${escHtml(payload.objectType)} #${escHtml(payload.objectId)}` : "",
+    payload.oldValue ? `Было: ${escHtml(payload.oldValue)}` : "",
+    payload.newValue ? `Стало: ${escHtml(payload.newValue)}` : "",
+  ].filter(Boolean).join("\n");
+  await pushWorkspaceLog(sql, userId, text, { parseMode: "HTML" });
 }
 
 export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverride?: string) {
@@ -1094,19 +1144,25 @@ async function clientMustSubscribe(
   return { block: true, url: url || `https://t.me/${parsed.username}`, label };
 }
 
-async function sendSubscribePrompt(token: string, chatId: string, cbId: string | undefined, url: string, label: string) {
-  if (cbId) await tg(token, "answerCallbackQuery", { callback_query_id: cbId, text: "Сначала подпишитесь на канал", show_alert: true });
+async function sendSubscribePrompt(token: string, chatId: string, cbId: string | undefined, url: string, label: string, fromStart = false) {
+  if (cbId && !fromStart) {
+    await tg(token, "answerCallbackQuery", { callback_query_id: cbId, text: "Сначала подпишитесь на канал", show_alert: true });
+  } else if (cbId) {
+    await tg(token, "answerCallbackQuery", { callback_query_id: cbId });
+  }
   const buttons: { text: string; url?: string; callback_data?: string }[][] = [];
   if (url) buttons.push([{ text: `📢 Открыть ${label}`, url }]);
   buttons.push([{ text: "✅ Я подписался", callback_data: "sub:ok" }]);
   await tg(token, "sendMessage", {
     chat_id: Number(chatId),
     text: [
-      `📢 Чтобы вызвать мастера, подпишитесь на ${label}.`,
-      `Usta chaqirish uchun ${label} kanaliga obuna bo‘ling.`,
+      "All Servis — вызов мастера на дом в Ташкенте.",
+      "",
+      `Чтобы начать, подпишитесь на ${label}.`,
+      `Boshlash uchun ${label} kanaliga obuna bo‘ling.`,
       "",
       "1) Нажмите «Открыть» и подпишитесь",
-      "2) Вернитесь и нажмите «Я подписался»",
+      "2) Вернитесь в бота и нажмите «Я подписался»",
     ].join("\n"),
     reply_markup: { inline_keyboard: buttons },
     disable_web_page_preview: true,
@@ -1129,7 +1185,8 @@ async function gated(
   if (!masterRow[0]) {
     const sub = await clientMustSubscribe(sql, uid, token, from.id);
     if (sub.block) {
-      await sendSubscribePrompt(token, chatId, cb?.id, sub.url, sub.label);
+      const fromStart = Boolean(msg?.text?.startsWith("/start") || cb?.data === "sub:ok");
+      await sendSubscribePrompt(token, chatId, cb?.id, sub.url, sub.label, fromStart);
       return true;
     }
   }

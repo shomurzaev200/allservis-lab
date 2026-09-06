@@ -7,7 +7,7 @@ export type PermKey = "invite" | "delete" | "assign" | "finance" | "bots";
 const NONE = { invite: false, delete: false, assign: false, finance: false, bots: false };
 
 export function useAccess() {
-  const q = useQuery({ queryKey: ["access"], queryFn: () => getAccess() });
+  const q = useQuery({ queryKey: ["access"], queryFn: () => getAccess(), refetchInterval: 20_000 });
   const role = q.data?.role ?? null;
   const owner = role === "owner";
   const perms = q.data?.perms ?? NONE;

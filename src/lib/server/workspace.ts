@@ -81,19 +81,43 @@ async function seed(sql: Sql, userId: string) {
 }
 
 
-export async function addEvent(sql: Sql, userId: string, orderId: number, eventType: string, actor: string, metadata: Record<string, string | number | boolean | null>) {
+export type StaffWho = { name: string; email: string; role: string };
+
+export async function addEvent(
+  sql: Sql,
+  userId: string,
+  orderId: number,
+  eventType: string,
+  actor: string,
+  metadata: Record<string, string | number | boolean | null>,
+  who?: StaffWho,
+) {
   await sql`
     insert into as_order_events (user_id, order_id, event_type, actor, metadata)
     values (${userId}, ${orderId}, ${eventType}, ${actor}, ${JSON.stringify(metadata)})
   `;
-  void pushOrderAlert(sql, userId, orderId, eventType);
+  void pushOrderAlert(sql, userId, orderId, eventType, who);
 }
 
-export async function addAudit(sql: Sql, userId: string, action: string, objectType: string, objectId: string, oldValue: string | null, newValue: string | null) {
+const SKIP_AUDIT_ALERT = new Set(["assign_master", "create_order"]);
+
+export async function addAudit(
+  sql: Sql,
+  userId: string,
+  action: string,
+  objectType: string,
+  objectId: string,
+  oldValue: string | null,
+  newValue: string | null,
+  who?: StaffWho,
+) {
   await sql`
     insert into as_audit (user_id, action, object_type, object_id, old_value, new_value)
     values (${userId}, ${action}, ${objectType}, ${objectId}, ${oldValue}, ${newValue})
   `;
+  if (who && !SKIP_AUDIT_ALERT.has(action)) {
+    void pushStaffAlert(sql, userId, action, objectType, objectId, oldValue, newValue, who);
+  }
 }
 
 export async function addNote(sql: Sql, userId: string, kind: string, title: string, body: string, orderId: number | null, masterId: number | null) {
@@ -103,10 +127,28 @@ export async function addNote(sql: Sql, userId: string, kind: string, title: str
   `;
 }
 
-async function pushOrderAlert(sql: Sql, userId: string, orderId: number, eventType: string) {
+async function pushOrderAlert(sql: Sql, userId: string, orderId: number, eventType: string, who?: StaffWho) {
   try {
     const { pushOrderChannelAlert } = await import("./telegram");
-    await pushOrderChannelAlert(sql, userId, orderId, eventType);
+    await pushOrderChannelAlert(sql, userId, orderId, eventType, who);
+  } catch {
+    /* alerts optional */
+  }
+}
+
+async function pushStaffAlert(
+  sql: Sql,
+  userId: string,
+  action: string,
+  objectType: string,
+  objectId: string,
+  oldValue: string | null,
+  newValue: string | null,
+  who: StaffWho,
+) {
+  try {
+    const { pushStaffActionAlert } = await import("./telegram");
+    await pushStaffActionAlert(sql, userId, { action, objectType, objectId, oldValue, newValue, who });
   } catch {
     /* alerts optional */
   }

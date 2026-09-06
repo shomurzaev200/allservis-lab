@@ -143,6 +143,9 @@ export async function actorCtx(userId: string) {
   const sql = await getSql();
   const actor = await resolveActor(sql, userId);
   await tickPresence(sql, actor.workspaceId);
+  try {
+    await sql`update as_staff set last_seen = now() where user_id = ${userId}`;
+  } catch { /* column until migrate */ }
   void resumeBots(sql, actor.workspaceId);
   return { sql, uid: actor.workspaceId, actor };
 }
