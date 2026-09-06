@@ -11,7 +11,7 @@ WorkingDirectory=/home/ubuntu/fjord-acre-sky-solar
 EnvironmentFile=-/home/ubuntu/fjord-acre-sky-solar/.env
 Environment=NODE_ENV=development
 Environment=PATH=/home/ubuntu/fjord-acre-sky-solar/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
-# Spawn vite by path — systemd PATH does not include node_modules/.bin.
+ExecStartPre=/usr/bin/node scripts/migrate.mjs
 ExecStart=/usr/bin/node scripts/with-app-env.mjs ./node_modules/.bin/vite dev --host 0.0.0.0 --port 8080
 Restart=on-failure
 RestartSec=5
