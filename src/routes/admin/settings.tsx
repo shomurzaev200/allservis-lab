@@ -134,8 +134,8 @@ function SettingsPage() {
       <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
         <h2 className="font-medium">Алерты в канал</h2>
         <p className="text-sm text-muted">
-          Отдельный бот не обязателен. Добавьте <span className="text-fg">основного бота</span> админом закрытого канала
-          (право «Публикация сообщений»). Самый простой способ привязать канал: перешлите боту любой пост из канала.
+          Отдельный бот не нужен. В админы канала добавьте <span className="text-fg">того же бота</span>, что подключён выше (смотрите @username).
+          Право «Публикация сообщений» обязательно.
         </p>
         {data?.lastAlertError ? (
           <p className="rounded-lg bg-danger/10 px-4 py-3 text-sm text-danger">Ошибка: {data.lastAlertError}</p>
@@ -148,17 +148,18 @@ function SettingsPage() {
           <p className="text-xs text-muted">Доп. бот алертов: @{logBot.bot_username} · {logBot.log_chat_id || "без чата"}</p>
         ) : null}
         <ol className="list-decimal space-y-1 pl-5 text-sm text-muted">
-          <li>Канал → Администраторы → Добавить → ваш основной бот</li>
+          <li>Канал → Администраторы → тот же @{data?.username || "бот"} что в блоке «Основной бот»</li>
           <li>Включите «Публикация сообщений»</li>
-          <li>Перешлите боту пост из канала <span className="text-fg">или</span> вставьте ID ниже</li>
-          <li>Нажмите «Сохранить и проверить»</li>
+          <li>Напишите любой пост <span className="text-fg">в сам канал</span> — бот сам возьмёт ID</li>
+          <li>Либо вставьте ссылку канала <span className="font-mono text-fg">t.me/c/123…</span> (не свой личный id)</li>
         </ol>
         <label className="block text-sm">
-          <span className="text-muted">ID канала (-100…) или @username</span>
-          <Input className="mt-1 font-mono" placeholder="-1001234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
+          <span className="text-muted">Ссылка или ID канала (t.me/c/… / -100… / @name)</span>
+          <Input className="mt-1 font-mono" placeholder="https://t.me/c/1234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
         </label>
         <p className="text-xs text-muted">
-          ID: перешлите пост из канала боту @userinfobot — строка Chat id вида -100…. Не путайте с личным id.
+          Если ошибка «chat not found»: вы вставили свой id, а не канала, либо в админах другой бот.
+          Снимите бота с админов и добавьте снова, затем напишите пост в канал.
         </p>
         {logBot ? (
           <Button size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить доп. бота алертов</Button>
