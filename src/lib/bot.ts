@@ -190,28 +190,34 @@ function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[]
   if (lang === "uz") {
     return [
       [{ id: "cmd:jobs", label: "⚡ Buyurtmalar" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 Onlayn" : "⚪️ Oflayn" }],
-      [{ id: "cmd:loc", label: "📍 Lokatsiyani yangilash" }],
-      [{ id: "cmd:profile", label: "👤 Profil / balans" }, { id: "cmd:active", label: "📦 Faol buyurtmalar" }],
-      [{ id: "role:client", label: "👤 Mijoz rejimiga" }],
+      [{ id: "cmd:loc", label: "📍 Lokatsiya" }, { id: "cmd:active", label: "📦 Faol" }],
+      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:stats", label: "📊 Statistika" }],
+      [{ id: "cmd:ref", label: "👥 Do‘stlar" }, { id: "cmd:help", label: "🆘 Yordam" }],
+      [{ id: "role:client", label: "👤 Mijoz" }, { id: "cmd:cancel", label: "❌ Bekor" }],
     ];
   }
   return [
-    [{ id: "cmd:jobs", label: "⚡ Доступные заказы" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 На линии" : "⚪️ Офлайн" }],
-    [{ id: "cmd:loc", label: "📍 Обновить локацию" }],
-    [{ id: "cmd:profile", label: "👤 Профиль / баланс" }, { id: "cmd:active", label: "📦 Мои активные заказы" }],
-    [{ id: "role:client", label: "👤 Режим клиента" }],
+    [{ id: "cmd:jobs", label: "⚡ Заказы" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 На линии" : "⚪️ Офлайн" }],
+    [{ id: "cmd:loc", label: "📍 Локация" }, { id: "cmd:active", label: "📦 Активные" }],
+    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:stats", label: "📊 Статистика" }],
+    [{ id: "cmd:ref", label: "👥 Друзья" }, { id: "cmd:help", label: "🆘 Помощь" }],
+    [{ id: "role:client", label: "👤 Клиент" }, { id: "cmd:cancel", label: "❌ Отмена" }],
   ];
 }
 
 function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
   return [...categoryKeys(lang), ...(lang === "uz"
     ? [
-        [{ id: "cmd:myorders", label: "📋 Mening arizalarim" }, { id: "cmd:lang", label: "🌐 Til" }],
-        [{ id: "role:master", label: "🛠 Usta bo‘lish" }],
+        [{ id: "cmd:myorders", label: "📋 Arizalarim" }, { id: "cmd:ref", label: "👥 Do‘stlar" }],
+        [{ id: "cmd:help", label: "🆘 Yordam" }, { id: "cmd:support", label: "📞 Operator" }],
+        [{ id: "cmd:lang", label: "🌐 Til" }, { id: "role:master", label: "🛠 Usta" }],
+        [{ id: "cmd:start", label: "🆕 Yangi ariza" }, { id: "cmd:cancel", label: "❌ Bekor" }],
       ]
     : [
-        [{ id: "cmd:myorders", label: "📋 Мои заявки" }, { id: "cmd:lang", label: "🌐 Язык" }],
-        [{ id: "role:master", label: "🛠 Стать мастером" }],
+        [{ id: "cmd:myorders", label: "📋 Мои заявки" }, { id: "cmd:ref", label: "👥 Друзья" }],
+        [{ id: "cmd:help", label: "🆘 Помощь" }, { id: "cmd:support", label: "📞 Оператор" }],
+        [{ id: "cmd:lang", label: "🌐 Язык" }, { id: "role:master", label: "🛠 Стать мастером" }],
+        [{ id: "cmd:start", label: "🆕 Новая заявка" }, { id: "cmd:cancel", label: "❌ Отмена" }],
       ])];
 }
 
@@ -342,15 +348,19 @@ export function labelToTapId(raw: string): string | null {
   if (q === fold(RU.change) || q.includes("измен") || q.includes("zgartir")) return "confirm:no";
   if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman") || q.includes("на линии")) return "online:on";
   if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn") || q.includes("офлайн")) return "online:off";
-  if (q.includes("доступн") || q.startsWith("⚡")) return "cmd:jobs";
-  if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
+  if (q.includes("доступн") || q.startsWith("⚡") || q.includes("buyurtma")) return "cmd:jobs";
+  if (q.includes("локац") || q.includes("lokatsiya") || q === "📍 локация") return "cmd:loc";
   if (q.includes("профиль") || q.includes("profil") || q.includes("баланс")) return "cmd:profile";
   if (q.includes("активн") || q.includes("faol")) return "cmd:active";
-  if (q.includes("мои заявк") || q.includes("mening ariza")) return "cmd:myorders";
-  if (q.includes("режим клиента") || q.includes("mijoz rejim")) return "role:client";
-  if (q.includes("стать мастером") || q.includes("usta bo")) return "role:master";
-  if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder)) return "cmd:start";
+  if (q.includes("статисти") || q.includes("statistika") || q.startsWith("📊")) return "cmd:stats";
+  if (q.startsWith("🆘") || q === "/help" || q === "помощь" || q === "yordam") return "cmd:help";
+  if (q.startsWith("📞") || q === "оператор" || q === "operator") return "cmd:support";
+  if (q.includes("друг") || q.includes("do‘st") || q.includes("dostlar") || q.includes("реферал") || q === "/ref") return "cmd:ref";
+  if (q.includes("режим клиента") || q.includes("mijoz rejim") || q === "👤 клиент" || q === "👤 mijoz") return "role:client";
+  if (q.includes("стать мастером") || q.includes("usta bo") || q === "🛠 usta") return "role:master";
+  if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder) || q.startsWith("🆕")) return "cmd:start";
   if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:start";
+  if (q.startsWith("❌") || q === "/cancel") return "cmd:cancel";
   return null;
 }
 

@@ -57,7 +57,7 @@ function Login() {
         <p className="font-display text-xs tracking-[0.2em] text-accent">ALL SERVIS</p>
         <h1 className="font-display text-2xl font-medium">Вход администратора</h1>
         <p className="text-sm text-muted">
-          Первый раз — нажмите «Создать аккаунт». Это новый пароль для All Servis, не пароль Gmail.
+          Первый владелец — «Создать аккаунт». Остальных добавляет владелец в Команде (логин + пароль).
         </p>
 
         {authEnabled ? (

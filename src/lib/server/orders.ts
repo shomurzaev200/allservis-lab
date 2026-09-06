@@ -30,7 +30,7 @@ export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput)
   if (!client[0]) {
     client = await sql<{ id: number }>`
       insert into as_clients (user_id, telegram_id, name, phone, city, district, lat, lng)
-      values (${uid}, ${data.telegramId ?? "bot"}, ${data.name}, ${data.phone}, ${"Ташкент"}, ${data.district}, ${data.lat}, ${data.lng})
+      values (${uid}, ${data.telegramId && data.telegramId.length >= 8 ? data.telegramId : null}, ${data.name}, ${data.phone}, ${"Ташкент"}, ${data.district}, ${data.lat}, ${data.lng})
       returning id
     `;
   } else if (data.telegramId) {
@@ -59,5 +59,12 @@ export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput)
   await addEvent(sql, uid, id, "created", "client", { source: "telegram" });
   await addNote(sql, uid, "admin", `Новая заявка №${publicNo}`, data.description, id, null);
   await addAudit(sql, uid, "create_order", "order", String(id), null, "waiting_admin");
+  try {
+    const cl = await sql<{ referred_by: string | null }>`select referred_by from as_clients where id = ${clientId}`;
+    const code = cl[0]?.referred_by;
+    if (code?.startsWith("c")) {
+      await sql`update as_ref_links set orders = orders + 1 where user_id = ${uid} and code = ${code}`;
+    }
+  } catch { /* ignore */ }
   return { id, publicNo, status: "waiting_admin" as const, price };
 }

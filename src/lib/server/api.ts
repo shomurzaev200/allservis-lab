@@ -5,8 +5,8 @@ import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
 import { addAudit, addEvent, addNote, tickPresence } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
-import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus } from "./telegram";
-import { actorCtx, requireAdmin, requireOwner } from "./access";
+import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest } from "./telegram";
+import { actorCtx, requireAdmin, requireOwner, can } from "./access";
 
 async function ctxSql(userId: string) {
   return actorCtx(userId);
@@ -42,6 +42,44 @@ export type AuditRow = { id: number; action: string; object_type: string; object
 function n(v: unknown): number {
   const x = typeof v === "number" ? v : Number(v);
   return Number.isFinite(x) ? x : 0;
+}
+
+async function ensureCredentialUser(
+  sql: Awaited<ReturnType<typeof getSql>>,
+  email: string,
+  name: string,
+  password: string,
+): Promise<string> {
+  const { hashPassword } = await import("better-auth/crypto");
+  const hashed = await hashPassword(password);
+  const existing = await sql<{ id: string }>`select id from "user" where email = ${email} limit 1`;
+  if (existing[0]) {
+    const userId = existing[0].id;
+    const acc = await sql<{ id: string }>`
+      select id from account where "userId" = ${userId} and "providerId" = ${"credential"} limit 1
+    `;
+    if (acc[0]) {
+      await sql`update account set password = ${hashed}, "updatedAt" = now() where id = ${acc[0].id}`;
+    } else {
+      const id = crypto.randomUUID();
+      await sql`
+        insert into account (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
+        values (${id}, ${userId}, ${"credential"}, ${userId}, ${hashed}, now(), now())
+      `;
+    }
+    return userId;
+  }
+  const userId = crypto.randomUUID();
+  await sql`
+    insert into "user" (id, name, email, "emailVerified", "createdAt", "updatedAt")
+    values (${userId}, ${name}, ${email}, ${true}, now(), now())
+  `;
+  const accId = crypto.randomUUID();
+  await sql`
+    insert into account (id, "accountId", "providerId", "userId", password, "createdAt", "updatedAt")
+    values (${accId}, ${userId}, ${"credential"}, ${userId}, ${hashed}, now(), now())
+  `;
+  return userId;
 }
 
 function mapMaster(r: Record<string, unknown>, active = 0): MasterRow {
@@ -83,7 +121,12 @@ const ORDER_SELECT = `
 `;
 
 async function listMastersInner(sql: Awaited<ReturnType<typeof getSql>>, uid: string) {
-  const rows = await sql`select * from as_masters where user_id = ${uid} order by rating desc`;
+  const rows = await sql`
+    select * from as_masters
+    where user_id = ${uid}
+      and length(coalesce(telegram_id, '')) >= 8
+    order by rating desc
+  `;
   const active = await sql<{ master_id: number; n: number }>`
     select master_id, count(*)::int as n from as_orders
     where user_id = ${uid} and master_id is not null
@@ -105,13 +148,16 @@ export const getDashboard = createServerFn({ method: "GET" })
         select count(*)::int as total,
           count(*) filter (where created_at >= current_date)::int as today,
           count(*) filter (where (select count(*) from as_orders o where o.client_id = as_clients.id) > 1)::int as returning
-        from as_clients where user_id = ${uid}`,
+        from as_clients where user_id = ${uid}
+          and name <> ${"Удалён"}
+          and length(coalesce(telegram_id, '')) >= 8`,
       sql<{ total: number; online: number; busy: number; offline: number }>`
         select count(*)::int as total,
           count(*) filter (where online_status = 'online')::int as online,
           count(*) filter (where online_status = 'busy')::int as busy,
           count(*) filter (where online_status = 'offline')::int as offline
-        from as_masters where user_id = ${uid}`,
+        from as_masters where user_id = ${uid}
+          and length(coalesce(telegram_id, '')) >= 8`,
       sql<{ total: number; today: number; week: number; waiting: number; assigned: number; work: number; done: number; cancelled: number; rejected: number }>`
         select count(*)::int as total,
           count(*) filter (where created_at >= current_date)::int as today,
@@ -265,7 +311,7 @@ export const listClients = createServerFn({ method: "GET" })
       left join as_orders o on o.client_id = cl.id
       where cl.user_id = ${uid}
         and cl.name <> ${"Удалён"}
-        and (cl.telegram_id is null or length(cl.telegram_id) >= 8)
+        and length(coalesce(cl.telegram_id, '')) >= 8
       group by cl.id
       order by cl.created_at desc`;
   });
@@ -300,6 +346,7 @@ export const assignMaster = createServerFn({ method: "POST" })
   .validator((d: { orderId: number; masterId: number }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { success: false as const, error: "Нет права назначать мастеров" };
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
     if (!order) return { success: false as const, error: "ORDER_NOT_FOUND" };
@@ -483,15 +530,25 @@ export const getBotSettings = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
-    const row = await sql<{
+    type WsRow = {
       bot_username: string | null; webhook_id: string | null; bot_connected_at: string | null; bot_token: string | null;
       poll_mode: boolean; channel_username: string | null; pay_card: string | null; pay_bank: string | null;
-      pay_holder: string | null; pay_amount: number; alerts_channel_id: string | null;
-    }>`
-      select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
-        channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id
-      from as_workspace where user_id = ${uid}`;
-    const w = row[0];
+      pay_holder: string | null; pay_amount: number; alerts_channel_id: string | null; last_alert_error?: string | null;
+    };
+    let w: WsRow | undefined;
+    try {
+      const row = await sql<WsRow>`
+        select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
+          channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id, last_alert_error
+        from as_workspace where user_id = ${uid}`;
+      w = row[0];
+    } catch {
+      const row = await sql<WsRow>`
+        select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
+          channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id
+        from as_workspace where user_id = ${uid}`;
+      w = row[0];
+    }
     const token = w?.bot_token ?? "";
     const masked = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : null;
     return {
@@ -507,6 +564,7 @@ export const getBotSettings = createServerFn({ method: "GET" })
       payHolder: w?.pay_holder ?? "",
       payAmount: n(w?.pay_amount),
       alertsChannel: w?.alerts_channel_id ?? "",
+      lastAlertError: w?.last_alert_error ?? "",
       role: actor.role,
       email: actor.email,
     };
@@ -517,6 +575,7 @@ export const saveBotToken = createServerFn({ method: "POST" })
   .validator((d: { token: string; publicOrigin: string }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "bots")) return { ok: false as const, error: "Нет права подключать ботов", username: null as string | null, mode: null as string | null };
     return connectTelegramBot(sql, uid, data.token.trim(), data.publicOrigin.replace(/\/$/, ""));
   });
 
@@ -532,37 +591,68 @@ export const getAccess = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const { actor } = await ctxSql(context.userId);
-    return { role: actor.role, email: actor.email, name: actor.name, workspaceId: actor.workspaceId };
+    return { role: actor.role, email: actor.email, name: actor.name, workspaceId: actor.workspaceId, perms: actor.perms };
   });
 
 export const listStaff = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const { sql, uid } = await ctxSql(context.userId);
-    return sql<{
-      id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
-    }>`
-      select id, user_id, email, name, role, blocked, created_at
-      from as_staff where workspace_id = ${uid} order by role asc, created_at asc
-    `;
+    try {
+      return await sql<{
+        id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
+        can_invite: boolean; can_delete: boolean; can_assign: boolean; can_finance: boolean; can_bots: boolean;
+      }>`
+        select id, user_id, email, name, role, blocked, created_at,
+          coalesce(can_invite, false) as can_invite,
+          coalesce(can_delete, true) as can_delete,
+          coalesce(can_assign, true) as can_assign,
+          coalesce(can_finance, false) as can_finance,
+          coalesce(can_bots, false) as can_bots
+        from as_staff where workspace_id = ${uid} order by role asc, created_at asc
+      `;
+    } catch {
+      const rows = await sql<{
+        id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
+      }>`select id, user_id, email, name, role, blocked, created_at from as_staff where workspace_id = ${uid} order by role asc, created_at asc`;
+      return rows.map((r) => ({ ...r, can_invite: false, can_delete: true, can_assign: true, can_finance: false, can_bots: false }));
+    }
   });
 
 export const inviteStaff = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { email: string; role?: string; name?: string }) => d)
+  .validator((d: {
+    email: string; name?: string; password?: string;
+    can_invite?: boolean; can_delete?: boolean; can_assign?: boolean; can_finance?: boolean; can_bots?: boolean;
+  }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
-    requireOwner(actor);
+    if (actor.role !== "owner" && !can(actor, "invite")) {
+      return { ok: false as const, error: "Нет права добавлять пользователей. Только владелец или тот, кому он это разрешил." };
+    }
     const email = data.email.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return { ok: false as const, error: "Некорректный email" };
-    const role = data.role === "owner" ? "admin" : "admin";
+    const password = (data.password ?? "").trim();
+    if (password.length < 8) return { ok: false as const, error: "Пароль минимум 8 символов" };
     const exists = await sql<{ id: number }>`select id from as_staff where workspace_id = ${uid} and email = ${email}`;
     if (exists[0]) return { ok: false as const, error: "Этот email уже в команде" };
+    const invite = actor.role === "owner" ? Boolean(data.can_invite) : false;
+    const del = data.can_delete !== false;
+    const assign = data.can_assign !== false;
+    const finance = actor.role === "owner" ? Boolean(data.can_finance) : false;
+    const bots = actor.role === "owner" ? Boolean(data.can_bots) : false;
+    const name = data.name?.trim() || email;
+    let authUserId: string | null = null;
+    try {
+      authUserId = await ensureCredentialUser(sql, email, name, password);
+    } catch (e) {
+      return { ok: false as const, error: e instanceof Error ? e.message : "Не удалось создать логин" };
+    }
     await sql`
-      insert into as_staff (workspace_id, user_id, email, name, role, blocked)
-      values (${uid}, ${null}, ${email}, ${data.name?.trim() || email}, ${role}, ${false})
+      insert into as_staff (workspace_id, user_id, email, name, role, blocked, can_invite, can_delete, can_assign, can_finance, can_bots)
+      values (${uid}, ${authUserId}, ${email}, ${name}, ${"admin"}, ${false}, ${invite}, ${del}, ${assign}, ${finance}, ${bots})
     `;
-    await addAudit(sql, uid, "invite_staff", "staff", email, null, role);
+    await addAudit(sql, uid, "invite_staff", "staff", email, null, "admin");
     return { ok: true as const, error: null };
   });
 
@@ -617,6 +707,7 @@ export const deleteClient = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "delete")) return { ok: false as const, error: "Нет права удалять клиентов" };
     const row = await sql<{ name: string }>`select name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
     const ids = await sql<{ id: number }>`select id from as_orders where user_id = ${uid} and client_id = ${data.id}`;
@@ -654,6 +745,7 @@ export const deleteMaster = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "delete")) return { ok: false as const, error: "Нет права удалять мастеров" };
     await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now(), master_id = null
       where user_id = ${uid} and master_id = ${data.id} and status in ('assigned','master_accepted','enroute','arrived','in_progress')`;
     try { await sql`delete from as_reviews where user_id = ${uid} and master_id = ${data.id}`; } catch { /* ignore */ }
@@ -697,6 +789,7 @@ export const addServiceBot = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "bots")) return { ok: false as const, error: "Нет права менять ботов", username: null as string | null, mode: null as string | null };
     const result = await connectExtraBot(
       sql,
       uid,
@@ -726,6 +819,7 @@ export const saveRequisites = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "bots")) return { ok: false as const, error: "Нет права менять настройки ботов" };
     const channel = (data.channel ?? "").replace(/^@/, "").trim();
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
     const rawAlerts = (data.alertsChannel ?? "").trim();
@@ -743,27 +837,22 @@ export const saveRequisites = createServerFn({ method: "POST" })
     `;
     if (alerts) {
       await sql`update as_bots set log_chat_id = ${alerts} where user_id = ${uid} and kind = ${"logs"}`;
-      const log = await sql<{ bot_token: string | null }>`
-        select bot_token from as_bots where user_id = ${uid} and kind = ${"logs"} and bot_token is not null limit 1
-      `;
-      let alertToken = log[0]?.bot_token ?? null;
-      if (!alertToken) {
-        const main = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
-        alertToken = main[0]?.bot_token ?? null;
-      }
-      if (alertToken) {
-        const { sendAlertTest } = await import("./telegram");
-        const sent = await sendAlertTest(alertToken, alerts);
-        if (!sent.ok) {
-          return {
-            ok: false as const,
-            error: `${sent.error}. Добавьте основного бота (или бота алертов) админом канала, право писать сообщения.`,
-          };
-        }
+      const sent = await sendWorkspaceAlertTest(sql, uid, alerts);
+      if (!sent.ok) {
+        await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
+        return { ok: false as const, error: sent.error };
       }
     }
     await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
     return { ok: true as const, error: null as string | null };
+  });
+
+export const testAlerts = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    return sendWorkspaceAlertTest(sql, uid);
   });
 
 export const listPayments = createServerFn({ method: "GET" })
@@ -785,6 +874,7 @@ export const reviewPayment = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "finance")) return { ok: false as const, error: "Нет права подтверждать оплаты" };
     const row = await sql<{ id: number; telegram_id: string | null; client_id: number | null; client_name: string; status: string }>`
       select id, telegram_id, client_id, client_name, status from as_payments where user_id = ${uid} and id = ${data.id}
     `;
@@ -827,6 +917,90 @@ export const setMasterOnline = createServerFn({ method: "POST" })
     const status = data.online ? "online" : "offline";
     await sql`update as_masters set online_status = ${status}, last_seen = now() where user_id = ${uid} and id = ${data.masterId} and online_status <> 'blocked'`;
     return { ok: true as const, status };
+  });
+
+export const setStaffPerms = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { id: number; can_invite?: boolean; can_delete?: boolean; can_assign?: boolean; can_finance?: boolean; can_bots?: boolean }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireOwner(actor);
+    const row = await sql<{ role: string }>`select role from as_staff where workspace_id = ${uid} and id = ${data.id}`;
+    if (!row[0]) return { ok: false as const, error: "Не найден" };
+    if (row[0].role === "owner") return { ok: false as const, error: "Права владельца нельзя менять" };
+    await sql`
+      update as_staff set
+        can_invite = ${Boolean(data.can_invite)},
+        can_delete = ${data.can_delete !== false},
+        can_assign = ${data.can_assign !== false},
+        can_finance = ${Boolean(data.can_finance)},
+        can_bots = ${Boolean(data.can_bots)}
+      where id = ${data.id} and workspace_id = ${uid}
+    `;
+    return { ok: true as const, error: null };
+  });
+
+function makeRefCode() {
+  return Math.random().toString(36).slice(2, 8);
+}
+
+export const listRefLinks = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const ws = await sql<{ bot_username: string | null }>`select bot_username from as_workspace where user_id = ${uid}`;
+    const username = ws[0]?.bot_username ?? "";
+    let campaigns: {
+      id: number; code: string; label: string; source: string; clicks: number; joins: number; orders: number; created_at: string;
+    }[] = [];
+    try {
+      campaigns = await sql`
+        select id, code, label, source, clicks, joins, orders, created_at
+        from as_ref_links where user_id = ${uid} order by created_at desc
+      `;
+    } catch { campaigns = []; }
+    let people: { name: string; ref_code: string; invited: number }[] = [];
+    try {
+      people = await sql`
+        select c.name, c.ref_code, count(o.id)::int as invited
+        from as_clients c
+        left join as_clients o on o.user_id = c.user_id and o.referred_by = c.ref_code
+        where c.user_id = ${uid} and c.ref_code is not null
+        group by c.id, c.name, c.ref_code
+        having count(o.id) > 0
+        order by count(o.id) desc
+        limit 20
+      `;
+    } catch { people = []; }
+    let bySource: { source: string; n: number }[] = [];
+    try {
+      bySource = await sql`
+        select coalesce(nullif(ref_source, ''), 'organic') as source, count(*)::int as n
+        from as_clients where user_id = ${uid} and name <> ${"Удалён"}
+          and length(coalesce(telegram_id, '')) >= 8
+        group by 1 order by n desc
+      `;
+    } catch { bySource = []; }
+    return { username, campaigns, people, bySource };
+  });
+
+export const createRefLink = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { label: string; source: string }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    const label = data.label.trim() || "Реклама";
+    const source = (data.source || "ads").trim().toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24) || "ads";
+    const code = `c${makeRefCode()}`;
+    await sql`
+      insert into as_ref_links (user_id, code, label, source)
+      values (${uid}, ${code}, ${label}, ${source})
+    `;
+    const ws = await sql<{ bot_username: string | null }>`select bot_username from as_workspace where user_id = ${uid}`;
+    const username = ws[0]?.bot_username ?? "";
+    const link = username ? `https://t.me/${username}?start=${code}` : code;
+    return { ok: true as const, code, link, error: null as string | null };
   });
 
 export { SERVICES, clientLabel };

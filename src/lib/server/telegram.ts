@@ -299,10 +299,18 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
     });
     return true;
   }
-  if (tapId === "cmd:profile") {
+  if (tapId === "cmd:stats" || tapId === "cmd:profile") {
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
       text: `${m[0].first_name} ${m[0].last_name}\nТел: ${m[0].phone}\nРайон: ${m[0].district || "—"}\nРейтинг: ${Number(m[0].rating).toFixed(2)}\nЗавершено: ${m[0].completed_orders}\nБаланс: ${Number(m[0].earnings).toLocaleString("ru-RU")} сум\nСтатус: ${m[0].online_status}`,
+      reply_markup: markup(masterMenu("ru", online)),
+    });
+    return true;
+  }
+  if (tapId === "cmd:help") {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Меню мастера:\n⚡ Заказы — назначенные вам\n🟢 На линии / офлайн\n📍 Локация — точка на карте\n📦 Активные — в работе\n👤 Профиль / 📊 статистика\n👥 Друзья — ваша ссылка\n❌ Отмена — сброс",
       reply_markup: markup(masterMenu("ru", online)),
     });
     return true;
@@ -339,6 +347,7 @@ async function setBotCommands(token: string) {
     commands: [
       { command: "start", description: "Меню / til / роль" },
       { command: "lang", description: "Русский / O‘zbekcha" },
+      { command: "ref", description: "Реферальная ссылка" },
       { command: "cancel", description: "Отмена заявки" },
       { command: "help", description: "Помощь" },
     ],
@@ -529,7 +538,8 @@ export async function connectExtraBot(
     }
     stopPoller(token);
   } else {
-    startPoller(token, webhookId, secret);
+    const main = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${userId}`;
+    if (main[0]?.bot_token !== token) startPoller(token, webhookId, secret);
     await sql`update as_workspace set poll_mode = ${true} where user_id = ${userId}`;
   }
   if (kind === "logs") {
@@ -552,6 +562,11 @@ export async function connectExtraBot(
         values (${userId}, ${"logs"}, ${label || "Логи"}, ${token}, ${username}, ${secret}, ${webhookId}, now())
       `;
     }
+    try {
+      const chRow = await sql<{ alerts_channel_id: string | null }>`select alerts_channel_id from as_workspace where user_id = ${userId}`;
+      const ch = chRow[0]?.alerts_channel_id;
+      if (ch) await sendWorkspaceAlertTest(sql, userId, ch);
+    } catch { /* ignore */ }
   } else {
     await sql`
       insert into as_bots (user_id, kind, label, bot_token, bot_username, bot_secret, webhook_id, connected_at)
@@ -586,44 +601,101 @@ export async function disconnectBotById(sql: Sql, userId: string, botId: number)
 function chatTarget(raw: string): string | number {
   const s = raw.trim();
   const m = s.match(/-100\d{8,14}/);
-  if (m) return Number(m[0]);
+  if (m) return m[0];
   if (s.startsWith("@") && s.length > 2) return s;
+  if (/^[A-Za-z][A-Za-z0-9_]{3,}$/.test(s)) return `@${s}`;
   const n = Number(s);
   if (Number.isFinite(n) && n !== 0) return n;
   return s;
 }
 
-export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
+async function collectAlertRoutes(sql: Sql, userId: string) {
+  const tokens = new Set<string>();
   const targets = new Set<string>();
-  const bots = await sql<{ bot_token: string | null; log_chat_id: string | null }>`
-    select bot_token, log_chat_id from as_bots
-    where user_id = ${userId} and kind = ${"logs"} and bot_token is not null
-  `;
-  let token: string | null = null;
-  for (const b of bots) {
-    if (b.bot_token) token = b.bot_token;
-    if (b.log_chat_id) targets.add(b.log_chat_id.trim());
-  }
+  try {
+    const bots = await sql<{ bot_token: string | null; log_chat_id: string | null }>`
+      select bot_token, log_chat_id from as_bots
+      where user_id = ${userId} and kind = ${"logs"} and bot_token is not null
+    `;
+    for (const b of bots) {
+      if (b.bot_token) tokens.add(b.bot_token);
+      if (b.log_chat_id) targets.add(b.log_chat_id.trim());
+    }
+  } catch { /* ignore */ }
   try {
     const ws = await sql<{ alerts_channel_id: string | null; bot_token: string | null }>`
       select alerts_channel_id, bot_token from as_workspace where user_id = ${userId}
     `;
     if (ws[0]?.alerts_channel_id) targets.add(ws[0].alerts_channel_id.trim());
-    if (!token && ws[0]?.bot_token) token = ws[0].bot_token;
+    if (ws[0]?.bot_token) tokens.add(ws[0].bot_token);
   } catch { /* ignore */ }
-  if (!token || !targets.size) return;
-  for (const chat of targets) {
-    try {
-      await tg(token, "sendMessage", { chat_id: chatTarget(chat), text: text.slice(0, 3500) });
-    } catch { /* ignore */ }
+  return { tokens, targets };
+}
+
+async function sendToAlerts(token: string, chat: string, text: string) {
+  const target = chatTarget(chat);
+  let r = await tg(token, "sendMessage", { chat_id: target, text: text.slice(0, 3500) });
+  if (!r.ok && typeof target === "string" && !String(target).startsWith("-100")) {
+    const looked = await tg(token, "getChat", { chat_id: target.startsWith("@") ? target : `@${target}` });
+    if (looked.ok && looked.result && !Array.isArray(looked.result)) {
+      const id = (looked.result as { id?: number }).id;
+      if (id) r = await tg(token, "sendMessage", { chat_id: id, text: text.slice(0, 3500) });
+    }
   }
+  return r;
+}
+
+export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
+  const { tokens, targets } = await collectAlertRoutes(sql, userId);
+  if (!tokens.size || !targets.size) {
+    try {
+      await sql`update as_workspace set last_alert_error = ${"Нет токена или ID канала. Настройки → токен бота алертов (или основной) + ID канала −100… Бот должен быть админом канала с правом писать."} where user_id = ${userId}`;
+    } catch { /* col may miss */ }
+    return;
+  }
+  let lastErr = "не отправлено";
+  let ok = false;
+  for (const token of tokens) {
+    for (const chat of targets) {
+      try {
+        const r = await sendToAlerts(token, chat, text);
+        if (r.ok) { ok = true; lastErr = ""; }
+        else lastErr = r.description ?? lastErr;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : lastErr;
+      }
+    }
+  }
+  try {
+    await sql`update as_workspace set last_alert_error = ${ok ? null : lastErr} where user_id = ${userId}`;
+  } catch { /* ignore */ }
+}
+
+export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverride?: string) {
+  const { tokens, targets } = await collectAlertRoutes(sql, userId);
+  if (chatOverride?.trim()) targets.add(chatOverride.trim());
+  if (!tokens.size) return { ok: false as const, error: "Нет токена: подключите основной бот или бот алертов." };
+  if (!targets.size) return { ok: false as const, error: "Нет ID канала. Вставьте −100… или добавьте бота админом канала." };
+  let lastErr = "Telegram отклонил сообщение";
+  for (const token of tokens) {
+    for (const chat of targets) {
+      const r = await sendToAlerts(token, chat, "All Servis: тест алерта. Если видите это — канал подключён.");
+      if (r.ok) {
+        try { await sql`update as_workspace set last_alert_error = ${null} where user_id = ${userId}`; } catch { /* ignore */ }
+        return { ok: true as const, error: null as string | null };
+      }
+      lastErr = r.description ?? lastErr;
+    }
+  }
+  const hint = lastErr.includes("chat not found") || lastErr.includes("not a member") || lastErr.includes("kicked")
+    ? `${lastErr}. Добавьте ЭТОГО бота админом канала (право «Публикация сообщений») и сохраните ID −100…`
+    : lastErr;
+  try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
+  return { ok: false as const, error: hint };
 }
 
 export async function sendAlertTest(token: string, chat: string) {
-  const json = await tg(token, "sendMessage", {
-    chat_id: chatTarget(chat),
-    text: "All Servis: тест алерта. Если видите это — канал подключён.",
-  });
+  const json = await sendToAlerts(token, chat, "All Servis: тест алерта. Если видите это — канал подключён.");
   return { ok: json.ok, error: json.ok ? null : (json.description ?? "Telegram отклонил сообщение") };
 }
 
@@ -766,6 +838,54 @@ async function gated(
   return true;
 }
 
+async function ensureRefCode(sql: Sql, uid: string, chatId: string) {
+  try {
+    const row = await sql<{ id: number; ref_code: string | null }>`
+      select id, ref_code from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+    `;
+    if (row[0] && !row[0].ref_code) {
+      const code = `r${chatId.slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
+      await sql`update as_clients set ref_code = ${code} where id = ${row[0].id} and ref_code is null`;
+    }
+  } catch { /* col may miss */ }
+}
+
+async function applyStartPayload(sql: Sql, uid: string, chatId: string, payload: string) {
+  const p = payload.trim();
+  if (!p) return;
+  try {
+    if (p.startsWith("r") && p.length >= 5) {
+      const inv = await sql<{ telegram_id: string | null }>`
+        select telegram_id from as_clients where user_id = ${uid} and ref_code = ${p} limit 1
+      `;
+      if (inv[0]?.telegram_id && inv[0].telegram_id !== chatId) {
+        await sql`
+          update as_clients set referred_by = coalesce(nullif(referred_by, ''), ${p}),
+            ref_source = coalesce(nullif(ref_source, ''), ${"user"})
+          where user_id = ${uid} and telegram_id = ${chatId}
+            and (referred_by is null or referred_by = '')
+        `;
+      }
+    } else if (p.startsWith("c")) {
+      await sql`update as_ref_links set clicks = clicks + 1 where user_id = ${uid} and code = ${p}`;
+      const src = await sql<{ source: string }>`select source from as_ref_links where user_id = ${uid} and code = ${p} limit 1`;
+      if (src[0]) {
+        const joined = await sql<{ id: number }>`
+          update as_clients
+          set referred_by = ${p},
+              ref_source = coalesce(nullif(ref_source, ''), ${src[0].source})
+          where user_id = ${uid} and telegram_id = ${chatId}
+            and (referred_by is null or referred_by = '')
+          returning id
+        `;
+        if (joined[0]) {
+          await sql`update as_ref_links set joins = joins + 1 where user_id = ${uid} and code = ${p}`;
+        }
+      }
+    }
+  } catch { /* ignore */ }
+}
+
 async function persistProfile(sql: Sql, uid: string, chatId: string, name: string, draft: Draft) {
   const lang = draft.lang ?? "ru";
   const role = draft.role ?? "client";
@@ -795,6 +915,7 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
         values (${uid}, ${chatId}, ${name}, ${phone}, ${"Ташкент"}, ${district}, ${lat}, ${lng}, ${5}, ${lang}, ${role})
       `;
     }
+    await ensureRefCode(sql, uid, chatId);
   } catch {
     /* lang/role columns until migrate */
     try {
@@ -868,21 +989,25 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const token = ws.bot_token;
   const uid = ws.user_id;
 
-  if (update.my_chat_member && (kind === "logs" || extra[0]?.kind === "logs")) {
+  if (update.my_chat_member) {
     const ch = update.my_chat_member.chat;
     const st = update.my_chat_member.new_chat_member?.status ?? "";
     if ((ch.type === "channel" || ch.type === "supergroup") && (st === "administrator" || st === "creator")) {
       const cid = String(ch.id);
-      if (extra[0]) await sql`update as_bots set log_chat_id = ${cid} where id = ${extra[0].id}`;
+      if (extra[0]?.kind === "logs") {
+        await sql`update as_bots set log_chat_id = ${cid} where id = ${extra[0].id}`;
+      }
       try {
-        await sql`update as_workspace set alerts_channel_id = ${cid} where user_id = ${uid}`;
-      } catch { /* col may miss until migrate */ }
+        await sql`update as_workspace set alerts_channel_id = ${cid}, last_alert_error = ${null} where user_id = ${uid}`;
+      } catch {
+        try { await sql`update as_workspace set alerts_channel_id = ${cid} where user_id = ${uid}`; } catch { /* ignore */ }
+      }
       await tg(token, "sendMessage", {
         chat_id: ch.id,
-        text: `Алерты All Servis подключены к каналу «${ch.title ?? cid}». Сюда пойдут заявки, оплаты, назначения.`,
+        text: `Алерты All Servis подключены к «${ch.title ?? cid}». Сюда пойдут заявки, оплаты, назначения.`,
       });
     }
-    return { ok: true };
+    if (kind === "logs") return { ok: true };
   }
 
   const from = msg?.from ?? cb?.from;
@@ -919,7 +1044,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const masterExists = await sql<{ id: number }>`
     select id from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
   `;
-  if (masterExists[0] && (tapGuess === "cmd:jobs" || tapGuess === "cmd:active" || tapGuess === "cmd:profile" || tapGuess === "cmd:loc" || tapGuess === "online:on" || tapGuess === "online:off")) {
+  if (masterExists[0] && (tapGuess === "cmd:jobs" || tapGuess === "cmd:active" || tapGuess === "cmd:profile" || tapGuess === "cmd:stats" || tapGuess === "cmd:help" || tapGuess === "cmd:loc" || tapGuess === "online:on" || tapGuess === "online:off")) {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     await handleMasterMenu(sql, uid, token, chatId, tapGuess);
     return { ok: true };
@@ -944,6 +1069,47 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       ? mine.map((x) => `№${x.public_no} · ${x.district} · ${x.status}`).join("\n")
       : "Заявок пока нет.";
     await tg(token, "sendMessage", { chat_id: Number(chatId), text: lines, reply_markup: markup(clientMenu("ru")) });
+    return { ok: true };
+  }
+
+  if (tapGuess === "cmd:ref") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const have = await sql<{ id: number }>`select id from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1`;
+    if (!have[0]) await persistProfile(sql, uid, chatId, name, emptyDraft());
+    await ensureRefCode(sql, uid, chatId);
+    const me = await sql<{ ref_code: string | null }>`select ref_code from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1`;
+    const botRow = await sql<{ bot_username: string | null }>`select bot_username from as_workspace where user_id = ${uid}`;
+    const code = me[0]?.ref_code ?? "";
+    const uname = botRow[0]?.bot_username ?? "";
+    const link = uname && code ? `https://t.me/${uname}?start=${code}` : code || "Сначала /start";
+    const invited = await sql<{ n: number }>`select count(*)::int as n from as_clients where user_id = ${uid} and referred_by = ${code}`;
+    const kb = masterExists[0] ? masterMenu("ru", true) : clientMenu("ru");
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: `Ваша уникальная ссылка:\n${link}\n\nПриглашено: ${invited[0]?.n ?? 0}\nДруг открывает ссылку — вы в статистике админки (Рефералы).`,
+      reply_markup: markup(kb),
+    });
+    return { ok: true };
+  }
+
+  if (tapGuess === "cmd:help") {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "All Servis:\n• Кнопки услуг — вызов мастера\n• 📋 Мои заявки — статус\n• 👥 Друзья — ваша ссылка\n• 📞 Оператор — диспетчер увидит сообщение\n• /start — меню  /lang — язык  /cancel — отмена",
+      reply_markup: markup(clientMenu("ru")),
+    });
+    return { ok: true };
+  }
+
+  if (tapGuess === "cmd:support") {
+    try {
+      await pushWorkspaceLog(sql, uid, `📞 Клиент ${name} (${chatId}) просит оператора.`);
+    } catch { /* ignore */ }
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Напишите вопрос одним сообщением — диспетчер получит алерт. Или подождите звонка по заявке.",
+      reply_markup: markup(clientMenu("ru")),
+    });
     return { ok: true };
   }
 
@@ -990,6 +1156,14 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     event = dataUrl ? { type: "photo", dataUrl } : { type: "text", text: msg.caption || "фото" };
   } else if (msg?.text) {
     event = { type: "text", text: msg.text };
+    if (msg.text.startsWith("/start")) {
+      const payload = msg.text.slice(6).trim();
+      if (payload) {
+        await persistProfile(sql, uid, chatId, name, draft);
+        await applyStartPayload(sql, uid, chatId, payload);
+      }
+      event = { type: "text", text: "/start" };
+    }
   }
   if (!event) return { ok: true };
 

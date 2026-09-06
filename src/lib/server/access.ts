@@ -4,6 +4,14 @@ import { resumeBots } from "./telegram";
 
 export type StaffRole = "owner" | "admin";
 
+export type Perms = {
+  invite: boolean;
+  delete: boolean;
+  assign: boolean;
+  finance: boolean;
+  bots: boolean;
+};
+
 export type Actor = {
   workspaceId: string;
   actorId: string;
@@ -11,7 +19,22 @@ export type Actor = {
   email: string;
   name: string;
   blocked: boolean;
+  perms: Perms;
 };
+
+function ownerPerms(): Perms {
+  return { invite: true, delete: true, assign: true, finance: true, bots: true };
+}
+
+function staffPerms(row: { can_invite?: boolean; can_delete?: boolean; can_assign?: boolean; can_finance?: boolean; can_bots?: boolean }): Perms {
+  return {
+    invite: Boolean(row.can_invite),
+    delete: row.can_delete !== false,
+    assign: row.can_assign !== false,
+    finance: Boolean(row.can_finance),
+    bots: Boolean(row.can_bots),
+  };
+}
 
 async function emailOf(sql: Sql, userId: string): Promise<{ email: string; name: string }> {
   try {
@@ -31,21 +54,35 @@ async function emailOf(sql: Sql, userId: string): Promise<{ email: string; name:
 export async function resolveActor(sql: Sql, userId: string): Promise<Actor> {
   const { email, name } = await emailOf(sql, userId);
 
-  const byUser = await sql<{
+  let byUser: {
     workspace_id: string; role: string; blocked: boolean; email: string; name: string;
-  }>`
-    select workspace_id, role, blocked, email, name from as_staff where user_id = ${userId} limit 1
-  `;
+    can_invite?: boolean; can_delete?: boolean; can_assign?: boolean; can_finance?: boolean; can_bots?: boolean;
+  }[] = [];
+  try {
+    byUser = await sql`
+      select workspace_id, role, blocked, email, name,
+        coalesce(can_invite, false) as can_invite,
+        coalesce(can_delete, true) as can_delete,
+        coalesce(can_assign, true) as can_assign,
+        coalesce(can_finance, false) as can_finance,
+        coalesce(can_bots, false) as can_bots
+      from as_staff where user_id = ${userId} limit 1
+    `;
+  } catch {
+    byUser = await sql`select workspace_id, role, blocked, email, name from as_staff where user_id = ${userId} limit 1`;
+  }
   if (byUser[0]) {
     if (byUser[0].blocked) throw new Error("BLOCKED");
     await ensureWorkspace(sql, byUser[0].workspace_id);
+    const role = byUser[0].role === "owner" ? "owner" as const : "admin" as const;
     return {
       workspaceId: byUser[0].workspace_id,
       actorId: userId,
-      role: byUser[0].role === "owner" ? "owner" : "admin",
+      role,
       email: byUser[0].email,
       name: byUser[0].name || name,
       blocked: false,
+      perms: role === "owner" ? ownerPerms() : staffPerms(byUser[0]),
     };
   }
 
@@ -67,6 +104,7 @@ export async function resolveActor(sql: Sql, userId: string): Promise<Actor> {
       email,
       name,
       blocked: false,
+      perms: invite[0].role === "owner" ? ownerPerms() : { invite: false, delete: true, assign: true, finance: false, bots: false },
     };
   }
 
@@ -76,7 +114,7 @@ export async function resolveActor(sql: Sql, userId: string): Promise<Actor> {
     values (${userId}, ${userId}, ${email}, ${name}, ${"owner"}, ${false})
     on conflict (workspace_id, email) do update set user_id = excluded.user_id, name = excluded.name
   `;
-  return { workspaceId: userId, actorId: userId, role: "owner", email, name, blocked: false };
+  return { workspaceId: userId, actorId: userId, role: "owner", email, name, blocked: false, perms: ownerPerms() };
 }
 
 export async function actorCtx(userId: string) {
@@ -93,4 +131,8 @@ export function requireOwner(actor: Actor) {
 
 export function requireAdmin(actor: Actor) {
   if (actor.role !== "owner" && actor.role !== "admin") throw new Error("ADMIN_ONLY");
+}
+
+export function can(actor: Actor, perm: keyof Perms) {
+  return actor.role === "owner" || Boolean(actor.perms?.[perm]);
 }

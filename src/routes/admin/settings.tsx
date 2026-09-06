@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { addServiceBot, dropBotToken, getBotSettings, listBots, removeServiceBot, saveBotToken, saveRequisites } from "@/lib/server/api";
+import { addServiceBot, dropBotToken, getBotSettings, listBots, removeServiceBot, saveBotToken, saveRequisites, testAlerts } from "@/lib/server/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -70,6 +70,10 @@ function SettingsPage() {
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
   });
+  const ping = useMutation({
+    mutationFn: () => testAlerts(),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
+  });
 
   const clientBots = bots.filter((b) => b.kind === "client");
   const logBot = bots.find((b) => b.kind === "logs");
@@ -130,8 +134,9 @@ function SettingsPage() {
       <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
         <h2 className="font-medium">Бот алертов + ID канала</h2>
         <p className="text-sm text-muted">
-          Отдельный бот из BotFather. Алерты (новые заявки, оплаты, онлайн мастеров) уходят в закрытый канал.
-          Добавьте этого бота <span className="text-fg">админом канала</span>.
+          Отдельный бот из BotFather <span className="text-fg">или основной бот</span>. Алерты (заявки, оплаты, онлайн) уходят в канал.
+          Бот <span className="text-fg">обязан быть админом канала</span> с правом «Публикация сообщений».
+          После смены токена нажмите «Проверить алерты».
         </p>
         {logBot ? (
           <div className="rounded-lg bg-ok/10 px-4 py-3 text-sm">
@@ -139,6 +144,11 @@ function SettingsPage() {
             <p className="mt-1 font-mono text-xs text-muted">
               Канал: {logBot.log_chat_id || data?.alertsChannel || "ещё не задан"}
             </p>
+            {data?.lastAlertError ? (
+              <p className="mt-2 text-sm text-danger">Последняя ошибка алерта: {data.lastAlertError}</p>
+            ) : (
+              <p className="mt-2 text-xs text-ok">Ошибок отправки нет — если ID канала верный, алерты идут.</p>
+            )}
             <Button className="mt-3" size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить</Button>
           </div>
         ) : (
@@ -161,12 +171,17 @@ function SettingsPage() {
         {addLogs.data?.ok ? <p className="text-sm text-ok">Бот алертов @{addLogs.data.username} подключён.</p> : null}
         {reqs.data?.ok ? <p className="text-sm text-ok">Тест ушёл в канал — проверьте Telegram.</p> : null}
         {reqs.data && !reqs.data.ok ? <p className="text-sm text-danger">{reqs.data.error}</p> : null}
+        {ping.data?.ok ? <p className="text-sm text-ok">Тест алерта доставлен.</p> : null}
+        {ping.data && !ping.data.ok ? <p className="text-sm text-danger">{ping.data.error}</p> : null}
         <div className="flex flex-wrap gap-2">
           <Button disabled={!logToken || addLogs.isPending} onClick={() => addLogs.mutate()}>
             {addLogs.isPending ? "Подключаю…" : "Подключить бота алертов"}
           </Button>
           <Button variant="outline" disabled={reqs.isPending} onClick={() => reqs.mutate()}>
             Сохранить ID канала
+          </Button>
+          <Button variant="outline" disabled={ping.isPending} onClick={() => ping.mutate()}>
+            {ping.isPending ? "Шлю…" : "Проверить алерты"}
           </Button>
         </div>
       </section>
