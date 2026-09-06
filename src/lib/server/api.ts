@@ -34,6 +34,7 @@ export type ClientListRow = {
   id: number; name: string; phone: string; telegram_id: string | null; district: string;
   rating: number; blocked: boolean; created_at: string; last_active: string | null;
   orders_count: number; completed_count: number; cancelled_count: number;
+  lang: string; role: string; lat: number | null; lng: number | null;
 };
 export type ReviewListRow = { id: number; rating: number; comment: string; created_at: string; public_no: number; client_name: string | null; master_name: string | null };
 export type AuditRow = { id: number; action: string; object_type: string; object_id: string; old_value: string | null; new_value: string | null; created_at: string };
@@ -256,7 +257,10 @@ export const listClients = createServerFn({ method: "GET" })
         max(o.created_at) as last_active,
         count(o.id)::int as orders_count,
         count(o.id) filter (where o.status = 'completed')::int as completed_count,
-        count(o.id) filter (where o.status = 'cancelled')::int as cancelled_count
+        count(o.id) filter (where o.status = 'cancelled')::int as cancelled_count,
+        coalesce(cl.lang, 'ru') as lang,
+        coalesce(cl.role, 'client') as role,
+        cl.lat, cl.lng
       from as_clients cl
       left join as_orders o on o.client_id = cl.id
       where cl.user_id = ${uid}
@@ -480,10 +484,10 @@ export const getBotSettings = createServerFn({ method: "GET" })
     const row = await sql<{
       bot_username: string | null; webhook_id: string | null; bot_connected_at: string | null; bot_token: string | null;
       poll_mode: boolean; channel_username: string | null; pay_card: string | null; pay_bank: string | null;
-      pay_holder: string | null; pay_amount: number;
+      pay_holder: string | null; pay_amount: number; alerts_channel_id: string | null;
     }>`
       select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
-        channel_username, pay_card, pay_bank, pay_holder, pay_amount
+        channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id
       from as_workspace where user_id = ${uid}`;
     const w = row[0];
     const token = w?.bot_token ?? "";
@@ -500,6 +504,7 @@ export const getBotSettings = createServerFn({ method: "GET" })
       payBank: w?.pay_bank ?? "",
       payHolder: w?.pay_holder ?? "",
       payAmount: n(w?.pay_amount),
+      alertsChannel: w?.alerts_channel_id ?? "",
       role: actor.role,
       email: actor.email,
     };
@@ -612,14 +617,12 @@ export const deleteClient = createServerFn({ method: "POST" })
     requireAdmin(actor);
     const row = await sql<{ name: string }>`select name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
-    const orders = await sql<{ n: number }>`select count(*)::int as n from as_orders where user_id = ${uid} and client_id = ${data.id}`;
-    if (n(orders[0]?.n)) {
-      await sql`update as_clients set blocked = true where user_id = ${uid} and id = ${data.id}`;
-      await addAudit(sql, uid, "block_client", "client", String(data.id), row[0].name, "has_orders");
-      return { ok: false as const, error: "У клиента есть заявки — профиль заблокирован вместо удаления" };
-    }
-    await sql`delete from as_clients where user_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, null);
+    await sql`
+      update as_clients
+      set name = ${"Удалён"}, phone = ${""}, telegram_id = ${null}, blocked = ${false}, paid = ${false}
+      where user_id = ${uid} and id = ${data.id}
+    `;
+    await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, "anonymized");
     return { ok: true as const, error: null };
   });
 
@@ -711,21 +714,26 @@ export const removeServiceBot = createServerFn({ method: "POST" })
 
 export const saveRequisites = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { channel?: string; payCard?: string; payBank?: string; payHolder?: string; payAmount?: number }) => d)
+  .validator((d: { channel?: string; payCard?: string; payBank?: string; payHolder?: string; payAmount?: number; alertsChannel?: string }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
     const channel = (data.channel ?? "").replace(/^@/, "").trim();
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
+    const alerts = (data.alertsChannel ?? "").trim();
     await sql`
       update as_workspace set
         channel_username = ${channel || null},
         pay_card = ${data.payCard?.trim() || null},
         pay_bank = ${data.payBank?.trim() || null},
         pay_holder = ${data.payHolder?.trim() || null},
-        pay_amount = ${amount}
+        pay_amount = ${amount},
+        alerts_channel_id = ${alerts || null}
       where user_id = ${uid}
     `;
+    if (alerts) {
+      await sql`update as_bots set log_chat_id = ${alerts} where user_id = ${uid} and kind = ${"logs"}`;
+    }
     await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
     return { ok: true as const };
   });

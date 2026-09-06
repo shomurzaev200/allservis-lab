@@ -18,7 +18,15 @@ type TgMessage = {
   location?: { latitude: number; longitude: number };
   contact?: { phone_number: string; first_name?: string };
 };
-type TgUpdate = { update_id: number; message?: TgMessage; callback_query?: { id: string; from: TgUser; data?: string; message?: TgMessage } };
+type TgUpdate = {
+  update_id: number;
+  message?: TgMessage;
+  callback_query?: { id: string; from: TgUser; data?: string; message?: TgMessage };
+  my_chat_member?: {
+    chat: { id: number; type?: string; title?: string };
+    new_chat_member?: { status?: string };
+  };
+};
 
 async function tg(token: string, method: string, body: Record<string, unknown>) {
   const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
@@ -33,7 +41,13 @@ async function tg(token: string, method: string, body: Record<string, unknown>) 
 function markup(buttons?: KeyboardButton[][]) {
   if (!buttons?.length) return { remove_keyboard: true };
   return {
-    keyboard: buttons.map((row) => row.map((b) => ({ text: b.label }))),
+    keyboard: buttons.map((row) =>
+      row.map((b) => ({
+        text: b.label,
+        ...(b.requestContact ? { request_contact: true as const } : {}),
+        ...(b.requestLocation ? { request_location: true as const } : {}),
+      })),
+    ),
     resize_keyboard: true,
   };
 }
@@ -72,7 +86,7 @@ export function startPoller(token: string, webhookId: string, secret: string) {
         const json = await tg(token, "getUpdates", {
           offset,
           timeout: 25,
-          allowed_updates: ["message", "callback_query"],
+          allowed_updates: ["message", "callback_query", "my_chat_member"],
         });
         if (!json.ok || !Array.isArray(json.result)) {
           await sleep(2500);
@@ -167,7 +181,7 @@ export async function connectTelegramBot(sql: Sql, userId: string, token: string
     const set = await tg(token, "setWebhook", {
       url: hookUrl,
       secret_token: secret,
-      allowed_updates: ["message", "callback_query"],
+      allowed_updates: ["message", "callback_query", "my_chat_member"],
       drop_pending_updates: false,
     });
     if (!set.ok) {
@@ -212,7 +226,7 @@ export async function connectExtraBot(
     const set = await tg(token, "setWebhook", {
       url: hookUrl,
       secret_token: secret,
-      allowed_updates: ["message", "callback_query"],
+      allowed_updates: ["message", "callback_query", "my_chat_member"],
       drop_pending_updates: false,
     });
     if (!set.ok) {
@@ -275,17 +289,27 @@ export async function disconnectBotById(sql: Sql, userId: string, botId: number)
 }
 
 export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
+  const targets = new Set<string>();
   const bots = await sql<{ bot_token: string | null; log_chat_id: string | null }>`
     select bot_token, log_chat_id from as_bots
-    where user_id = ${userId} and kind = ${"logs"} and bot_token is not null and log_chat_id is not null
+    where user_id = ${userId} and kind = ${"logs"} and bot_token is not null
   `;
+  let token: string | null = null;
   for (const b of bots) {
-    if (!b.bot_token || !b.log_chat_id) continue;
+    if (b.bot_token) token = b.bot_token;
+    if (b.log_chat_id) targets.add(b.log_chat_id);
+  }
+  try {
+    const ws = await sql<{ alerts_channel_id: string | null }>`
+      select alerts_channel_id from as_workspace where user_id = ${userId}
+    `;
+    if (ws[0]?.alerts_channel_id) targets.add(ws[0].alerts_channel_id);
+  } catch { /* ignore */ }
+  if (!token) return;
+  for (const chat of targets) {
     try {
-      await tg(b.bot_token, "sendMessage", { chat_id: Number(b.log_chat_id), text: text.slice(0, 3500) });
-    } catch {
-      /* ignore */
-    }
+      await tg(token, "sendMessage", { chat_id: Number(chat), text: text.slice(0, 3500) });
+    } catch { /* ignore */ }
   }
 }
 
@@ -428,6 +452,85 @@ async function gated(
   return true;
 }
 
+async function persistProfile(sql: Sql, uid: string, chatId: string, name: string, draft: Draft) {
+  const lang = draft.lang ?? "ru";
+  const role = draft.role ?? "client";
+  const phone = draft.phone ?? "";
+  const district = draft.districtId ? (districtById(draft.districtId)?.title ?? "") : "";
+  const lat = draft.lat ?? null;
+  const lng = draft.lng ?? null;
+  try {
+    const existing = await sql<{ id: number }>`
+      select id from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+    `;
+    if (existing[0]) {
+      await sql`
+        update as_clients set
+          name = ${name},
+          phone = coalesce(nullif(${phone}, ''), phone),
+          district = coalesce(nullif(${district}, ''), district),
+          lat = coalesce(${lat}, lat),
+          lng = coalesce(${lng}, lng),
+          lang = ${lang},
+          role = ${role}
+        where id = ${existing[0].id}
+      `;
+    } else {
+      await sql`
+        insert into as_clients (user_id, telegram_id, name, phone, city, district, lat, lng, rating, lang, role)
+        values (${uid}, ${chatId}, ${name}, ${phone}, ${"Ташкент"}, ${district}, ${lat}, ${lng}, ${5}, ${lang}, ${role})
+      `;
+    }
+  } catch {
+    /* lang/role columns until migrate */
+    try {
+      await sql`
+        update as_clients set name = ${name},
+          phone = coalesce(nullif(${phone}, ''), phone),
+          district = coalesce(nullif(${district}, ''), district),
+          lat = coalesce(${lat}, lat),
+          lng = coalesce(${lng}, lng)
+        where user_id = ${uid} and telegram_id = ${chatId}
+      `;
+    } catch { /* ignore */ }
+  }
+}
+
+async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: string, draft: Draft) {
+  const parts = name.trim().split(/\s+/);
+  const first = parts[0] || "Мастер";
+  const last = parts.slice(1).join(" ") || "Telegram";
+  const spec = draft.serviceId ?? "other";
+  const phone = draft.phone ?? "";
+  const dist = draft.districtId ? districtById(draft.districtId)?.title ?? "" : "";
+  const lat = draft.lat ?? null;
+  const lng = draft.lng ?? null;
+  const found = await sql<{ id: number }>`
+    select id from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  if (found[0]) {
+    await sql`
+      update as_masters set first_name = ${first}, last_name = ${last}, phone = ${phone},
+        district = ${dist}, specialization = ${spec}, lat = ${lat}, lng = ${lng},
+        online_status = 'online', last_seen = now()
+      where id = ${found[0].id}
+    `;
+  } else {
+    await sql`
+      insert into as_masters (
+        user_id, first_name, last_name, telegram_id, phone, city, district,
+        specialization, online_status, last_seen, lat, lng
+      ) values (
+        ${uid}, ${first}, ${last}, ${chatId}, ${phone}, ${"Ташкент"}, ${dist},
+        ${spec}, ${"online"}, now(), ${lat}, ${lng}
+      )
+    `;
+  }
+  try {
+    await pushWorkspaceLog(sql, uid, `🛠 Новый мастер из бота: ${name} · ${spec} · ${phone} · ${dist}`);
+  } catch { /* ignore */ }
+}
+
 export async function handleTelegramWebhook(hookId: string, secretHeader: string | null, update: TgUpdate) {
   const sql = await getSql();
   const extra = await sql<{
@@ -446,20 +549,38 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 
   const msg = update.message;
   const cb = update.callback_query;
-  const from = msg?.from ?? cb?.from;
-  const chatId = String(msg?.chat.id ?? cb?.message?.chat.id ?? from?.id ?? "");
-  if (!chatId || !from) return { ok: true };
 
   const kind = extra[0]?.kind ?? "client";
   const token = ws.bot_token;
   const uid = ws.user_id;
+
+  if (update.my_chat_member && (kind === "logs" || extra[0]?.kind === "logs")) {
+    const ch = update.my_chat_member.chat;
+    const st = update.my_chat_member.new_chat_member?.status ?? "";
+    if ((ch.type === "channel" || ch.type === "supergroup") && (st === "administrator" || st === "creator")) {
+      const cid = String(ch.id);
+      if (extra[0]) await sql`update as_bots set log_chat_id = ${cid} where id = ${extra[0].id}`;
+      try {
+        await sql`update as_workspace set alerts_channel_id = ${cid} where user_id = ${uid}`;
+      } catch { /* col may miss until migrate */ }
+      await tg(token, "sendMessage", {
+        chat_id: ch.id,
+        text: `Алерты All Servis подключены к каналу «${ch.title ?? cid}». Сюда пойдут заявки, оплаты, назначения.`,
+      });
+    }
+    return { ok: true };
+  }
+
+  const from = msg?.from ?? cb?.from;
+  const chatId = String(msg?.chat.id ?? cb?.message?.chat.id ?? from?.id ?? "");
+  if (!chatId || !from) return { ok: true };
 
   if (kind === "logs") {
     if (msg?.text === "/start" || msg?.text === "/log") {
       await sql`update as_bots set log_chat_id = ${chatId} where id = ${extra[0]!.id}`;
       await tg(token, "sendMessage", {
         chat_id: Number(chatId),
-        text: "Лог-бот All Servis подключён. Сюда будут приходить заявки, назначения, блокировки и оплаты.",
+        text: "Личный чат логов привязан. Чтобы слать алерты в закрытый канал: добавьте этого бота админом канала — ID сохранится сам. Либо вставьте ID канала (−100…) в Настройках.",
       });
     }
     return { ok: true };
@@ -472,7 +593,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const sess = await sql<{ step: string; draft: string; live_order_id: number | null; last_status: string | null }>`
     select step, draft, live_order_id, last_status from as_tg_sessions where user_id = ${uid} and chat_id = ${chatId}
   `;
-  let step = (sess[0]?.step ?? "category") as ChatStep;
+  let step = (sess[0]?.step ?? "lang") as ChatStep;
   let draft: Draft = sess[0]?.draft ? (JSON.parse(sess[0].draft) as Draft) : emptyDraft();
   draft = { ...emptyDraft(), ...draft, name };
 
@@ -483,7 +604,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   } else if (msg?.location) {
     event = { type: "location", lat: msg.location.latitude, lng: msg.location.longitude };
   } else if (msg?.contact?.phone_number) {
-    event = { type: "text", text: msg.contact.phone_number };
+    event = { type: "contact", phone: msg.contact.phone_number };
   } else if (msg?.photo?.length) {
     const fileId = msg.photo[msg.photo.length - 1]!.file_id;
     const dataUrl = await downloadPhoto(token, fileId);
@@ -496,6 +617,21 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const result = reduceBot(step, draft, event);
   step = result.step;
   draft = result.draft;
+
+  await persistProfile(sql, uid, chatId, name, draft);
+
+  if (result.registerMaster) {
+    await upsertMasterFromBot(sql, uid, chatId, name, draft);
+  }
+  if (result.setOnline !== undefined) {
+    await sql`
+      update as_masters set online_status = ${result.setOnline ? "online" : "offline"}, last_seen = now()
+      where user_id = ${uid} and telegram_id = ${chatId} and online_status <> 'blocked'
+    `;
+    try {
+      await pushWorkspaceLog(sql, uid, `${result.setOnline ? "🟢" : "⚪️"} Мастер ${name} ${result.setOnline ? "онлайн" : "офлайн"}`);
+    } catch { /* ignore */ }
+  }
 
   if (result.cancelLive && sess[0]?.live_order_id) {
     const oid = sess[0].live_order_id;

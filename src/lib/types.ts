@@ -2,20 +2,28 @@ import type { ServiceId } from "./catalog";
 import type { OrderStatus } from "./domain";
 
 export type ChatStep =
+  | "lang"
+  | "role"
   | "category"
   | "problem"
   | "photo"
   | "district"
+  | "geo"
   | "phone"
   | "comment"
   | "confirm"
   | "live"
   | "rate"
-  | "idle";
+  | "idle"
+  | "master_spec"
+  | "master_phone"
+  | "master_geo";
 
 export type KeyboardButton = {
   id: string;
   label: string;
+  requestContact?: boolean;
+  requestLocation?: boolean;
 };
 
 export type ChatMessage = {
@@ -29,6 +37,9 @@ export type ChatMessage = {
   kind?: "text" | "order" | "master" | "status";
 };
 
+export type Lang = "ru" | "uz";
+export type UserRole = "client" | "master";
+
 export type Draft = {
   serviceId?: ServiceId;
   problem?: string;
@@ -39,6 +50,8 @@ export type Draft = {
   phone?: string;
   comment?: string;
   name: string;
+  lang?: Lang;
+  role?: UserRole;
 };
 
 export type LiveOrder = {

@@ -20,6 +20,7 @@ function SettingsPage() {
   const [payBank, setPayBank] = useState("");
   const [payHolder, setPayHolder] = useState("");
   const [payAmount, setPayAmount] = useState("0");
+  const [alertsChannel, setAlertsChannel] = useState("");
 
   useEffect(() => {
     if (!data) return;
@@ -28,6 +29,7 @@ function SettingsPage() {
     setPayBank(data.payBank ?? "");
     setPayHolder(data.payHolder ?? "");
     setPayAmount(String(data.payAmount ?? 0));
+    setAlertsChannel(data.alertsChannel ?? "");
   }, [data]);
 
   const save = useMutation({
@@ -56,7 +58,7 @@ function SettingsPage() {
   });
   const reqs = useMutation({
     mutationFn: () => saveRequisites({
-      data: { channel, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0 },
+      data: { channel, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel },
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
   });
@@ -143,6 +145,13 @@ function SettingsPage() {
           <span className="text-muted">Сумма пополнения, сум (0 = не требовать оплату)</span>
           <Input className="mt-1" inputMode="numeric" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
         </label>
+        <label className="block text-sm">
+          <span className="text-muted">ID закрытого канала алертов (−100…)</span>
+          <Input className="mt-1 font-mono" placeholder="-1001234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
+        </label>
+        <p className="text-xs text-muted">
+          Либо добавьте лог-бота админом в закрытый канал — ID сохранится сам. Алерты (заявки, оплаты, онлайн мастеров) уходят туда.
+        </p>
         {reqs.data?.ok ? <p className="text-sm text-ok">Сохранено.</p> : null}
         <Button disabled={reqs.isPending} onClick={() => reqs.mutate()}>
           {reqs.isPending ? "Сохраняю…" : "Сохранить реквизиты"}
