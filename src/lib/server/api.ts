@@ -5,7 +5,7 @@ import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
 import { addAudit, addEvent, addNote, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
-import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId } from "./telegram";
+import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
 
 async function ctxSql(userId: string) {
@@ -898,7 +898,8 @@ export const saveRequisites = createServerFn({ method: "POST" })
     channel = channel.split(/[?#]/)[0].replace(/\/$/, "");
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
     const rawAlerts = (data.alertsChannel ?? "").trim();
-    const alerts = rawAlerts ? normalizeChatId(rawAlerts) : "";
+    let alerts = rawAlerts ? normalizeChatId(rawAlerts) : "";
+    if (alerts && channel && channelOverlap(channel, alerts)) alerts = "";
     const requireSub = data.requireSubscribe !== false;
     try {
       await sql`
@@ -926,6 +927,8 @@ export const saveRequisites = createServerFn({ method: "POST" })
     }
     if (alerts) {
       await sql`update as_bots set log_chat_id = ${alerts} where user_id = ${uid} and kind = ${"logs"}`;
+    } else {
+      try { await sql`update as_bots set log_chat_id = ${null} where user_id = ${uid} and kind = ${"logs"}`; } catch { /* ignore */ }
     }
     await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites", who(actor));
     return { ok: true as const, error: null as string | null };

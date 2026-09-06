@@ -751,6 +751,7 @@ async function collectAlertRoutes(sql: Sql, userId: string) {
   const seen = new Set<string>();
   const channelTargets = new Set<string>();
   const dmTargets = new Set<string>();
+  let subscribeRaw = "";
   function addToken(t: string | null | undefined, first = false) {
     const token = (t ?? "").trim();
     if (!token || seen.has(token)) return;
@@ -779,24 +780,41 @@ async function collectAlertRoutes(sql: Sql, userId: string) {
       select alerts_channel_id, bot_token, channel_username from as_workspace where user_id = ${userId}
     `;
     addToken(ws[0]?.bot_token);
+    subscribeRaw = (ws[0]?.channel_username ?? "").trim();
     if (ws[0]?.alerts_channel_id) {
       for (const id of chatIdVariants(ws[0].alerts_channel_id)) {
         if (id.startsWith("-") || id.startsWith("@")) channelTargets.add(id);
         else dmTargets.add(id);
       }
     }
-    if (ws[0]?.channel_username) {
-      const u = ws[0].channel_username.replace(/^@/, "").trim();
-      if (u) channelTargets.add(`@${u}`);
-    }
   } catch { /* ignore */ }
+  if (subscribeRaw) {
+    const subKeys = channelKeys(subscribeRaw);
+    for (const token of tokenList) {
+      for (const ref of chatIdVariants(subscribeRaw)) {
+        const looked = await tg(token, "getChat", { chat_id: ref });
+        if (looked.ok && looked.result && !Array.isArray(looked.result)) {
+          const r = looked.result as { id?: number; username?: string };
+          if (r.id != null) subKeys.add(String(r.id));
+          if (r.username) subKeys.add(`@${String(r.username).toLowerCase()}`);
+        }
+      }
+      if ([...subKeys].some((k) => k.startsWith("-"))) break;
+    }
+    const hit = (id: string) => {
+      for (const k of channelKeys(id)) if (subKeys.has(k)) return true;
+      return false;
+    };
+    for (const id of [...channelTargets]) if (hit(id)) channelTargets.delete(id);
+    for (const id of [...dmTargets]) if (hit(id)) dmTargets.delete(id);
+  }
   const hasNumeric = [...channelTargets].some((id) => id.startsWith("-"));
   if (hasNumeric) {
     for (const id of [...channelTargets]) {
       if (id.startsWith("@")) channelTargets.delete(id);
     }
   }
-  return { tokens: tokenList, channelTargets, dmTargets };
+  return { tokens: tokenList, channelTargets, dmTargets, subscribeRaw };
 }
 
 async function sendToAlerts(token: string, chat: string, text: string, extra: Record<string, unknown> = {}): Promise<{ ok: boolean; description?: string; used?: string }> {
@@ -828,6 +846,13 @@ async function sendToAlerts(token: string, chat: string, text: string, extra: Re
 }
 
 async function bindAlertChannel(sql: Sql, uid: string, chatId: string, token: string, title?: string) {
+  try {
+    const sub = await sql<{ channel_username: string | null }>`select channel_username from as_workspace where user_id = ${uid}`;
+    const raw = (sub[0]?.channel_username ?? "").trim();
+    if (raw && (channelOverlap(raw, chatId) || (title ? channelOverlap(raw, title) : false))) {
+      return { ok: true as const, used: chatId, skipped: true as const };
+    }
+  } catch { /* ignore */ }
   const id = String(chatId);
   try {
     await sql`update as_workspace set alerts_channel_id = ${id}, last_alert_error = ${null} where user_id = ${uid}`;
@@ -974,6 +999,14 @@ export async function pushStaffActionAlert(
 
 export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverride?: string) {
   await resumeBots(sql, userId);
+  let subRaw = "";
+  try {
+    const row = await sql<{ channel_username: string | null }>`select channel_username from as_workspace where user_id = ${userId}`;
+    subRaw = (row[0]?.channel_username ?? "").trim();
+  } catch { /* ignore */ }
+  if (chatOverride?.trim() && subRaw && channelOverlap(subRaw, chatOverride)) {
+    return { ok: false as const, error: "Это канал подписки клиентов. Алерты туда не идут. Укажите ДРУГОЙ канал для отчётов (закрытый −100…), а @username оставьте в блоке «Обязательная подписка»." };
+  }
   if (chatOverride?.trim()) {
     for (const id of chatIdVariants(chatOverride)) {
       if (id.startsWith("-") || id.startsWith("@")) {
@@ -989,13 +1022,13 @@ export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverr
   const { tokens, channelTargets } = await collectAlertRoutes(sql, userId);
   if (chatOverride?.trim()) {
     for (const id of chatIdVariants(chatOverride)) {
-      if (id.startsWith("-") || id.startsWith("@")) channelTargets.add(id);
+      if ((id.startsWith("-") || id.startsWith("@")) && !(subRaw && channelOverlap(subRaw, id))) channelTargets.add(id);
     }
   }
   if (!tokens.length) return { ok: false as const, error: "Нет токена: подключите основной бот и добавьте ИМЕННО ЕГО админом канала." };
   const channels = [...channelTargets];
   if (!channels.length) {
-    const hint = "Нет ID канала. Не копируйте свой личный id. Откройте канал → поделитесь ссылкой t.me/c/… ИЛИ напишите любой пост в канал после того как бот стал админом ИЛИ перешлите пост боту.";
+    const hint = "Нет канала алертов. Не используйте публичный канал подписки. Вставьте ID закрытого канала −100… в «Алерты» ИЛИ перешлите боту пост из канала отчётов.";
     try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
     return { ok: false as const, error: hint };
   }
@@ -1078,12 +1111,16 @@ function parseSubChannel(raw: string): { username: string; chatIds: string[]; ur
     }
     return out;
   }
+  if (/^-?100?\d{8,14}$/.test(s.replace(/\s/g, ""))) {
+    out.chatIds.push(...chatIdVariants(s));
+    return out;
+  }
   if (s.startsWith("+") || s.toLowerCase().startsWith("joinchat/")) {
     out.url = `https://t.me/${s}`;
     return out;
   }
   const user = (s.split("/")[0] ?? "").replace(/[^A-Za-z0-9_]/g, "");
-  if (user.length >= 4) {
+  if (user.length >= 4 && /[A-Za-z]/.test(user)) {
     out.username = user;
     out.chatIds.push(`@${user}`);
     out.url = `https://t.me/${user}`;
@@ -1091,11 +1128,37 @@ function parseSubChannel(raw: string): { username: string; chatIds: string[]; ur
   return out;
 }
 
+function channelKeys(raw: string): Set<string> {
+  const keys = new Set<string>();
+  const add = (x: string) => {
+    const v = x.trim().toLowerCase();
+    if (v) keys.add(v);
+  };
+  for (const v of chatIdVariants(raw)) add(v);
+  const p = parseSubChannel(raw);
+  if (p.username) add(`@${p.username}`);
+  for (const id of p.chatIds) add(id);
+  return keys;
+}
+
+export function channelOverlap(a: string, b: string): boolean {
+  if (!(a ?? "").trim() || !(b ?? "").trim()) return false;
+  const A = channelKeys(a);
+  for (const k of channelKeys(b)) if (A.has(k)) return true;
+  return false;
+}
+
 async function isChannelMember(token: string, chatRef: string, userId: number): Promise<boolean> {
-  const member = await tg(token, "getChatMember", { chat_id: chatRef, user_id: userId });
-  if (!member.ok || !member.result || Array.isArray(member.result)) return false;
-  const st = String((member.result as { status?: string }).status ?? "");
-  return st === "member" || st === "administrator" || st === "creator" || st === "restricted";
+  const refs = chatIdVariants(chatRef);
+  if (!refs.includes(chatRef)) refs.unshift(chatRef);
+  for (const id of refs) {
+    const member = await tg(token, "getChatMember", { chat_id: id, user_id: userId });
+    if (!member.ok || !member.result || Array.isArray(member.result)) continue;
+    const st = String((member.result as { status?: string }).status ?? "");
+    if (st === "member" || st === "administrator" || st === "creator" || st === "restricted") return true;
+    if (st === "left" || st === "kicked") return false;
+  }
+  return false;
 }
 
 async function subscribeUrl(token: string, parsed: { username: string; chatIds: string[]; url: string }): Promise<string> {
@@ -1441,21 +1504,22 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const uid = ws.user_id;
 
   if (update.channel_post?.chat) {
+    if (kind !== "logs") return { ok: true };
     const ch = update.channel_post.chat;
     const cid = String(ch.id);
     try {
       const cur = await sql<{ alerts_channel_id: string | null }>`select alerts_channel_id from as_workspace where user_id = ${uid}`;
       if (cur[0]?.alerts_channel_id === cid) return { ok: true };
     } catch { /* ignore */ }
-    await bindAlertChannel(sql, uid, cid, token, ch.title);
+    await bindAlertChannel(sql, uid, cid, token, ch.title ?? ch.username);
     return { ok: true };
   }
 
   if (update.my_chat_member) {
     const ch = update.my_chat_member.chat;
     const st = update.my_chat_member.new_chat_member?.status ?? "";
-    if ((ch.type === "channel" || ch.type === "supergroup") && (st === "administrator" || st === "creator" || st === "member")) {
-      await bindAlertChannel(sql, uid, String(ch.id), token, ch.title);
+    if (kind === "logs" && (ch.type === "channel" || ch.type === "supergroup") && (st === "administrator" || st === "creator" || st === "member")) {
+      await bindAlertChannel(sql, uid, String(ch.id), token, ch.title ?? ch.username);
     }
     if (kind === "logs") return { ok: true };
   }
@@ -1466,10 +1530,19 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 
   const fwd = msg?.forward_from_chat ?? (msg?.forward_origin?.chat ?? null);
   if (fwd && (fwd.type === "channel" || fwd.type === "supergroup")) {
-    await bindAlertChannel(sql, uid, String(fwd.id), token, fwd.title);
+    if (fwd.username && kind !== "logs") {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: `Публичный канал @${fwd.username} — для подписки клиентов, алерты туда не пишем. Перешлите пост из ЗАКРЫТОГО канала отчётов (без @username).`,
+      });
+      return { ok: true };
+    }
+    const bound = await bindAlertChannel(sql, uid, String(fwd.id), token, fwd.title ?? fwd.username);
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
-      text: `Канал алертов сохранён (${fwd.title ?? fwd.id}). Проверьте канал — туда ушёл тест. Если пусто: сделайте ЭТОГО бота админом с правом «Публикация сообщений».`,
+      text: "skipped" in bound && bound.skipped
+        ? "Это канал подписки клиентов — алерты туда не пишем. Перешлите пост из ДРУГОГО (закрытого) канала для отчётов."
+        : `Канал алертов сохранён (${fwd.title ?? fwd.id}). Проверьте канал — туда ушёл тест. Если пусто: сделайте ЭТОГО бота админом с правом «Публикация сообщений».`,
     });
     return { ok: true };
   }

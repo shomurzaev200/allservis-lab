@@ -85,6 +85,15 @@ function SettingsInner() {
     mutationFn: () => testAlerts({ data: { channel: alertsChannel } }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
   });
+  const unbind = useMutation({
+    mutationFn: () => saveRequisites({
+      data: { channel, requireSubscribe, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel: "" },
+    }),
+    onSuccess: () => {
+      setAlertsChannel("");
+      void qc.invalidateQueries({ queryKey: ["bot-settings"] });
+    },
+  });
 
   const clientBots = bots.filter((b) => b.kind === "client");
   const logBot = bots.find((b) => b.kind === "logs");
@@ -143,15 +152,15 @@ function SettingsInner() {
       </section>
 
       <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
-        <h2 className="font-medium">Алерты в канал</h2>
+        <h2 className="font-medium">Алерты — только закрытый канал отчётов</h2>
         <p className="text-sm text-muted">
-          Отдельный бот не нужен. В админы канала добавьте <span className="text-fg">того же бота</span>, что подключён выше (смотрите @username).
-          Право «Публикация сообщений» обязательно.
+          Сюда идут заявки и кто что нажал. <span className="text-fg">Не указывайте публичный канал для клиентов</span> — туда алерты больше не пишутся.
+          Публичный @канал — в блоке «Обязательная подписка» ниже.
         </p>
         {data?.lastAlertError ? (
           <p className="rounded-lg bg-danger/10 px-4 py-3 text-sm text-danger">Ошибка: {data.lastAlertError}</p>
         ) : data?.alertsChannel ? (
-          <p className="rounded-lg bg-ok/10 px-4 py-3 text-sm text-ok">Канал привязан: {data.alertsChannel}</p>
+          <p className="rounded-lg bg-ok/10 px-4 py-3 text-sm text-ok">Канал отчётов: {data.alertsChannel}</p>
         ) : (
           <p className="rounded-lg bg-warn/10 px-4 py-3 text-sm text-warn">Канал ещё не привязан — алерты в канал не уходят.</p>
         )}
@@ -159,19 +168,14 @@ function SettingsInner() {
           <p className="text-xs text-muted">Доп. бот алертов: @{logBot.bot_username} · {logBot.log_chat_id || "без чата"}</p>
         ) : null}
         <ol className="list-decimal space-y-1 pl-5 text-sm text-muted">
-          <li>Канал → Администраторы → тот же @{data?.username || "бот"} что в блоке «Основной бот»</li>
-          <li>Включите «Публикация сообщений»</li>
-          <li>Напишите любой пост <span className="text-fg">в сам канал</span> — бот сам возьмёт ID</li>
-          <li>Либо вставьте ссылку канала <span className="font-mono text-fg">t.me/c/123…</span> (не свой личный id)</li>
+          <li>Создайте <span className="text-fg">отдельный закрытый канал</span> только для себя (не тот, на который подписываются клиенты)</li>
+          <li>Админы → тот же @{data?.username || "бот"} что в блоке «Основной бот» → «Публикация сообщений»</li>
+          <li>Перешлите боту пост из этого закрытого канала — или вставьте −100… / t.me/c/…</li>
         </ol>
         <label className="block text-sm">
-          <span className="text-muted">Ссылка или ID канала (t.me/c/… / -100… / @name)</span>
-          <Input className="mt-1 font-mono" placeholder="https://t.me/c/1234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
+          <span className="text-muted">Закрытый канал отчётов (t.me/c/… / -100…), не @публичный</span>
+          <Input className="mt-1 font-mono" placeholder="https://t.me/c/1234567890 или -100…" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
         </label>
-        <p className="text-xs text-muted">
-          Если ошибка «chat not found»: вы вставили свой id, а не канала, либо в админах другой бот.
-          Снимите бота с админов и добавьте снова, затем напишите пост в канал.
-        </p>
         {logBot ? (
           <Button size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить доп. бота алертов</Button>
         ) : null}
@@ -182,16 +186,16 @@ function SettingsInner() {
         </label>
         {addLogs.data && !addLogs.data.ok ? <p className="text-sm text-danger">{addLogs.data.error}</p> : null}
         {addLogs.data?.ok ? <p className="text-sm text-ok">Бот алертов @{addLogs.data.username} подключён.</p> : null}
-        {reqs.data?.ok ? <p className="text-sm text-ok">Тест ушёл в канал — откройте канал в Telegram.</p> : null}
+        {unbind.data?.ok ? <p className="text-sm text-ok">Алерты в канал отключены. Публичный канал больше не получит отчёты.</p> : null}
         {reqs.data && !reqs.data.ok ? <p className="text-sm text-danger">{reqs.data.error}</p> : null}
-        {ping.data?.ok ? <p className="text-sm text-ok">Тест доставлен в канал.</p> : null}
+        {ping.data?.ok ? <p className="text-sm text-ok">Тест доставлен в канал отчётов.</p> : null}
         {ping.data && !ping.data.ok ? <p className="text-sm text-danger">{ping.data.error}</p> : null}
         <div className="flex flex-wrap gap-2">
-          <Button disabled={(!alertsChannel && !logToken) || ping.isPending || reqs.isPending} onClick={() => {
-            if (alertsChannel.trim()) ping.mutate();
-            else reqs.mutate();
-          }}>
-            {ping.isPending ? "Шлю тест…" : "Сохранить и проверить"}
+          <Button disabled={!alertsChannel || ping.isPending} onClick={() => ping.mutate()}>
+            {ping.isPending ? "Шлю тест…" : "Проверить канал отчётов"}
+          </Button>
+          <Button variant="outline" disabled={unbind.isPending || reqs.isPending} onClick={() => unbind.mutate()}>
+            {unbind.isPending ? "Отвязываю…" : "Не слать алерты в канал"}
           </Button>
           {logToken ? (
             <Button variant="outline" disabled={addLogs.isPending} onClick={() => addLogs.mutate()}>
@@ -202,25 +206,25 @@ function SettingsInner() {
       </section>
 
       <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
-        <h2 className="font-medium">Обязательная подписка на канал</h2>
+        <h2 className="font-medium">Обязательная подписка на ваш ТГК</h2>
         <p className="text-sm text-muted">
-          Клиент не вызовет мастера, пока не подпишется. Основной бот должен быть <span className="text-fg">админом этого канала</span>
-          — иначе Telegram не покажет, подписан человек или нет.
+          После /start клиент <span className="text-fg">не пойдёт дальше</span>, пока не подпишется. Основной бот должен быть
+          админом этого канала — иначе Telegram не скажет, подписан человек или нет.
         </p>
         <label className="flex items-center gap-2 text-sm">
           <input type="checkbox" checked={requireSubscribe} onChange={(e) => setRequireSubscribe(e.target.checked)} />
-          Требовать подписку
+          Требовать подписку (включите)
         </label>
         <label className="block text-sm">
-          <span className="text-muted">Канал: @username или t.me/имя</span>
-          <Input className="mt-1 font-mono" placeholder="allservis_uz или https://t.me/allservis_uz" value={channel} onChange={(e) => setChannel(e.target.value)} />
+          <span className="text-muted">Публичный канал клиентов: @username или https://t.me/имя</span>
+          <Input className="mt-1 font-mono" placeholder="@allservis_uz или https://t.me/allservis_uz" value={channel} onChange={(e) => setChannel(e.target.value)} />
         </label>
         <p className="text-xs text-muted">
-          Это публичный канал для клиентов. Канал алертов (закрытый, −100…) сюда не подходит — его поле выше, в «Алерты».
+          Сюда — только канал, на который должны подписаться клиенты. Закрытый канал алертов (−100…) сюда не вставляйте.
         </p>
-        {reqs.data?.ok ? <p className="text-sm text-ok">Сохранено. Напишите боту /start с другого аккаунта — должен попросить подписку.</p> : null}
-        <Button disabled={reqs.isPending} onClick={() => reqs.mutate()}>
-          {reqs.isPending ? "Сохраняю…" : "Сохранить подписку и реквизиты"}
+        {reqs.data?.ok ? <p className="text-sm text-ok">Сохранено. Напишите боту /start с другого аккаунта — первым экраном будет «Подпишитесь».</p> : null}
+        <Button disabled={!channel.trim() || reqs.isPending} onClick={() => reqs.mutate()}>
+          {reqs.isPending ? "Сохраняю…" : "Включить обязательную подписку"}
         </Button>
       </section>
 
