@@ -47,9 +47,17 @@ function SettingsPage() {
     onSuccess: () => { void qc.invalidateQueries(); setExtraToken(""); setExtraLabel(""); },
   });
   const addLogs = useMutation({
-    mutationFn: () => addServiceBot({
-      data: { token: logToken, publicOrigin: window.location.origin, kind: "logs", label: "Логи" },
-    }),
+    mutationFn: async () => {
+      const bot = await addServiceBot({
+        data: { token: logToken, publicOrigin: window.location.origin, kind: "logs", label: "Алерты" },
+      });
+      if (bot.ok && alertsChannel.trim()) {
+        await saveRequisites({
+          data: { channel, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel },
+        });
+      }
+      return bot;
+    },
     onSuccess: () => { void qc.invalidateQueries(); setLogToken(""); },
   });
   const remove = useMutation({
@@ -119,6 +127,49 @@ function SettingsPage() {
         </div>
       </section>
 
+      <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
+        <h2 className="font-medium">Бот алертов + ID канала</h2>
+        <p className="text-sm text-muted">
+          Отдельный бот из BotFather. Алерты (новые заявки, оплаты, онлайн мастеров) уходят в закрытый канал.
+          Добавьте этого бота <span className="text-fg">админом канала</span>.
+        </p>
+        {logBot ? (
+          <div className="rounded-lg bg-ok/10 px-4 py-3 text-sm">
+            <p className="font-medium text-ok">Подключен @{logBot.bot_username}</p>
+            <p className="mt-1 font-mono text-xs text-muted">
+              Канал: {logBot.log_chat_id || data?.alertsChannel || "ещё не задан"}
+            </p>
+            <Button className="mt-3" size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить</Button>
+          </div>
+        ) : (
+          <p className="rounded-lg bg-warn/10 px-4 py-3 text-sm text-warn">Бот алертов ещё не подключён.</p>
+        )}
+        <label className="block text-sm">
+          <span className="text-muted">Токен бота алертов (BotFather)</span>
+          <Input className="mt-1 font-mono" type="password" autoComplete="off" placeholder="123456789:AAHxxxx"
+            value={logToken} onChange={(e) => setLogToken(e.target.value)} />
+        </label>
+        <label className="block text-sm">
+          <span className="text-muted">ID закрытого канала (−100…)</span>
+          <Input className="mt-1 font-mono" placeholder="-1001234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
+        </label>
+        <p className="text-xs text-muted">
+          ID канала: перешлите любое сообщение из канала боту @userinfobot — он покажет id вида -100….
+          Либо просто добавьте бота алертов админом канала — id сохранится сам.
+        </p>
+        {addLogs.data && !addLogs.data.ok ? <p className="text-sm text-danger">{addLogs.data.error}</p> : null}
+        {addLogs.data?.ok ? <p className="text-sm text-ok">Бот алертов @{addLogs.data.username} подключён.</p> : null}
+        {reqs.data?.ok ? <p className="text-sm text-ok">ID канала сохранён.</p> : null}
+        <div className="flex flex-wrap gap-2">
+          <Button disabled={!logToken || addLogs.isPending} onClick={() => addLogs.mutate()}>
+            {addLogs.isPending ? "Подключаю…" : "Подключить бота алертов"}
+          </Button>
+          <Button variant="outline" disabled={reqs.isPending} onClick={() => reqs.mutate()}>
+            Сохранить ID канала
+          </Button>
+        </div>
+      </section>
+
       <section className="glass-card space-y-4 rounded-xl p-5">
         <h2 className="font-medium">Реквизиты и обязательная подписка</h2>
         <p className="text-sm text-muted">
@@ -145,13 +196,6 @@ function SettingsPage() {
           <span className="text-muted">Сумма пополнения, сум (0 = не требовать оплату)</span>
           <Input className="mt-1" inputMode="numeric" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
         </label>
-        <label className="block text-sm">
-          <span className="text-muted">ID закрытого канала алертов (−100…)</span>
-          <Input className="mt-1 font-mono" placeholder="-1001234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
-        </label>
-        <p className="text-xs text-muted">
-          Либо добавьте лог-бота админом в закрытый канал — ID сохранится сам. Алерты (заявки, оплаты, онлайн мастеров) уходят туда.
-        </p>
         {reqs.data?.ok ? <p className="text-sm text-ok">Сохранено.</p> : null}
         <Button disabled={reqs.isPending} onClick={() => reqs.mutate()}>
           {reqs.isPending ? "Сохраняю…" : "Сохранить реквизиты"}
@@ -176,29 +220,7 @@ function SettingsPage() {
           {addExtra.isPending ? "Подключаю…" : "Добавить бота"}
         </Button>
       </section>
-
-      <section className="glass-card space-y-4 rounded-xl p-5">
-        <h2 className="font-medium">Бот логов</h2>
-        <p className="text-sm text-muted">
-          Отдельный бот в BotFather. Подключите токен, затем напишите ему <span className="font-mono text-accent">/start</span>.
-        </p>
-        {logBot ? (
-          <div className="rounded-lg bg-ok/10 px-4 py-3 text-sm">
-            <p className="font-medium text-ok">@{logBot.bot_username}</p>
-            <p className="mt-1 text-xs text-muted">
-              {logBot.log_chat_id ? "Чат логов привязан." : "Напишите боту /start, чтобы привязать чат."}
-            </p>
-            <Button className="mt-3" size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить лог-бота</Button>
-          </div>
-        ) : null}
-        <Input className="font-mono" type="password" autoComplete="off" placeholder="токен лог-бота"
-          value={logToken} onChange={(e) => setLogToken(e.target.value)} />
-        {addLogs.data && !addLogs.data.ok ? <p className="text-sm text-danger">{addLogs.data.error}</p> : null}
-        {addLogs.data?.ok ? <p className="text-sm text-ok">Лог-бот @{addLogs.data.username}. Напишите ему /start.</p> : null}
-        <Button disabled={!logToken || addLogs.isPending} onClick={() => addLogs.mutate()}>
-          {addLogs.isPending ? "Подключаю…" : "Подключить бота логов"}
-        </Button>
-      </section>
     </div>
   );
 }
+

@@ -35,7 +35,7 @@ export const SERVICES: Service[] = [
     from: 80_000,
     diag: 30_000,
     etaMin: 25,
-    keywords: ["сантех", "кран", "труб", "унитаз", "смесит", "засор", "протеч", "вода", "стояк", "слив"],
+    keywords: ["сантех", "кран", "труб", "унитаз", "смесит", "засор", "протеч", "вода", "стояк", "слив", "santex", "kran", "truba"],
   },
   {
     id: "elec",
@@ -44,7 +44,7 @@ export const SERVICES: Service[] = [
     from: 70_000,
     diag: 30_000,
     etaMin: 30,
-    keywords: ["электр", "свет", "розет", "щит", "провод", "автомат", "ламп", "выключ"],
+    keywords: ["электр", "свет", "розет", "щит", "провод", "автомат", "ламп", "выключ", "elektr", "chiroq", "rozetka"],
   },
   {
     id: "ac",
@@ -53,7 +53,7 @@ export const SERVICES: Service[] = [
     from: 150_000,
     diag: 40_000,
     etaMin: 40,
-    keywords: ["кондиц", "сплит", "заправ", "фреон", "охлажд", "кондёр", "кондер"],
+    keywords: ["кондиц", "сплит", "заправ", "фреон", "охлажд", "кондёр", "кондер", "konditsioner", "konditsion"],
   },
   {
     id: "appliance",
@@ -62,7 +62,7 @@ export const SERVICES: Service[] = [
     from: 100_000,
     diag: 40_000,
     etaMin: 45,
-    keywords: ["стирал", "холодиль", "плит", "духов", "посудом", "техника", "машинк"],
+    keywords: ["стирал", "холодиль", "плит", "духов", "посудом", "техника", "машинк", "texnika", "texnik", "sovutgich"],
   },
   {
     id: "furniture",
@@ -71,7 +71,7 @@ export const SERVICES: Service[] = [
     from: 120_000,
     diag: 0,
     etaMin: 60,
-    keywords: ["мебел", "сборк", "шкаф", "ikea", "икеа", "кухн", "стол", "кровать"],
+    keywords: ["мебел", "сборк", "шкаф", "ikea", "икеа", "кухн", "стол", "кровать", "mebel"],
   },
   {
     id: "lock",
@@ -80,7 +80,7 @@ export const SERVICES: Service[] = [
     from: 90_000,
     diag: 0,
     etaMin: 20,
-    keywords: ["замк", "дверь", "двери", "вскры", "ключ", "личинк", "броне"],
+    keywords: ["замк", "дверь", "двери", "вскры", "ключ", "личинк", "броне", "qulf", "eshik"],
   },
   {
     id: "paint",
@@ -89,7 +89,7 @@ export const SERVICES: Service[] = [
     from: 200_000,
     diag: 0,
     etaMin: 90,
-    keywords: ["маляр", "покрас", "обои", "шпакл", "потолок", "стен"],
+    keywords: ["маляр", "покрас", "обои", "шпакл", "потолок", "стен", "boyoq", "bo'yoq", "malyar"],
   },
   {
     id: "other",
@@ -98,7 +98,7 @@ export const SERVICES: Service[] = [
     from: 80_000,
     diag: 30_000,
     etaMin: 40,
-    keywords: ["друг", "не знаю", "мастер", "помощь"],
+    keywords: ["друг", "не знаю", "мастер", "помощь", "boshqa", "other"],
   },
 ];
 
@@ -118,7 +118,29 @@ export function districtById(id: string): District | undefined {
 }
 
 export function matchService(text: string): Service | undefined {
-  const q = text.toLowerCase();
+  const q = text.toLowerCase().replace(/[‘’ʻʼ`']/g, "'").trim();
+  if (q.startsWith("svc:")) return serviceById(q.slice(4));
+  const aliases: Record<string, ServiceId> = {
+    техника: "appliance",
+    texnika: "appliance",
+    "бытовая техника": "appliance",
+    сантехник: "plumb",
+    santexnik: "plumb",
+    электрик: "elec",
+    elektrik: "elec",
+    кондиционер: "ac",
+    konditsioner: "ac",
+    мебель: "furniture",
+    mebel: "furniture",
+    замки: "lock",
+    qulflar: "lock",
+    маляр: "paint",
+    "bo'yoqchi": "paint",
+    "bo‘yoqchi": "paint",
+    другое: "other",
+    boshqa: "other",
+  };
+  if (aliases[q]) return serviceById(aliases[q]);
   const exact = SERVICES.find((s) => s.title.toLowerCase() === q);
   if (exact) return exact;
   return SERVICES.find((s) => s.keywords.some((k) => q.includes(k)));

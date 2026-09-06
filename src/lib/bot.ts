@@ -297,8 +297,43 @@ function summary(d: Draft): string {
   return lines.join("\n");
 }
 
+function fold(s: string) {
+  return s.toLowerCase().replace(/[‘’ʻʼ`']/g, "'").replace(/\s+/g, " ").trim();
+}
+
+function labelToTapId(raw: string): string | null {
+  const q = fold(raw);
+  if (!q) return null;
+  if (q === "русский") return "lang:ru";
+  if (q.includes("zbek")) return "lang:uz";
+  if (q === fold(RU.client) || q === fold(UZ.client)) return "role:client";
+  if (q === fold(RU.master) || q === fold(UZ.master)) return "role:master";
+  for (const lang of ["ru", "uz"] as Lang[]) {
+    for (const row of categoryKeys(lang)) {
+      for (const b of row) if (fold(b.label) === q) return b.id;
+    }
+    for (const row of districtKeys(lang)) {
+      for (const b of row) if (fold(b.label) === q) return b.id;
+    }
+  }
+  if (q === fold(RU.skipPhoto) || q === fold(UZ.skipPhoto) || q.includes("пропуст")) return "photo:skip";
+  if (q === fold(RU.skipGeo) || q === fold(UZ.skipGeo)) return "geo:skip";
+  if (q === fold(RU.skipComment) || q === fold(UZ.skipComment)) return "cmt:skip";
+  if (q === fold(RU.confirm) || q === "подтвердить") return "confirm:yes";
+  if (q === fold(RU.change) || q.includes("измен") || q.includes("zgartir")) return "confirm:no";
+  if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman")) return "online:on";
+  if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn")) return "online:off";
+  if (q === fold(RU.newOrder) || q === fold(UZ.newOrder) || q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:start";
+  return null;
+}
+
 export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotResult {
   const lang = draft.lang ?? "ru";
+
+  if (event.type === "text") {
+    const mapped = labelToTapId(event.text);
+    if (mapped) event = { type: "tap", id: mapped, label: event.text };
+  }
 
   if (event.type === "contact") {
     return reduceBot(step, draft, { type: "text", text: event.phone });

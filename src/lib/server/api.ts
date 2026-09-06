@@ -733,6 +733,21 @@ export const saveRequisites = createServerFn({ method: "POST" })
     `;
     if (alerts) {
       await sql`update as_bots set log_chat_id = ${alerts} where user_id = ${uid} and kind = ${"logs"}`;
+      const log = await sql<{ bot_token: string | null }>`
+        select bot_token from as_bots where user_id = ${uid} and kind = ${"logs"} and bot_token is not null limit 1
+      `;
+      if (log[0]?.bot_token) {
+        try {
+          await fetch(`https://api.telegram.org/bot${log[0].bot_token}/sendMessage`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              chat_id: Number(alerts),
+              text: "All Servis: алерты подключены к этому каналу.",
+            }),
+          });
+        } catch { /* ignore */ }
+      }
     }
     await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
     return { ok: true as const };

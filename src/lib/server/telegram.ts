@@ -52,6 +52,17 @@ function markup(buttons?: KeyboardButton[][]) {
   };
 }
 
+async function setBotCommands(token: string) {
+  await tg(token, "setMyCommands", {
+    commands: [
+      { command: "start", description: "Меню / til / роль" },
+      { command: "lang", description: "Русский / O‘zbekcha" },
+      { command: "cancel", description: "Отмена заявки" },
+      { command: "help", description: "Помощь" },
+    ],
+  });
+}
+
 function secretFrom(token: string) {
   let h = 0;
   for (let i = 0; i < token.length; i++) h = (h * 33 + token.charCodeAt(i)) >>> 0;
@@ -173,6 +184,7 @@ export async function connectTelegramBot(sql: Sql, userId: string, token: string
     return { ok: false as const, error: me.description ?? "Telegram не принял токен. Проверьте, что бот создан в @BotFather.", username: null, mode: null };
   }
   const username = String((me.result as Record<string, unknown>).username ?? "");
+  try { await setBotCommands(token); } catch { /* ignore */ }
   const webhookId = crypto.randomUUID();
   const secret = secretFrom(token);
   const https = origin.startsWith("https://");
@@ -218,6 +230,7 @@ export async function connectExtraBot(
     return { ok: false as const, error: me.description ?? "Telegram не принял токен.", username: null, mode: null };
   }
   const username = String((me.result as Record<string, unknown>).username ?? "");
+  try { await setBotCommands(token); } catch { /* ignore */ }
   const webhookId = crypto.randomUUID();
   const secret = secretFrom(token);
   const https = origin.startsWith("https://");
