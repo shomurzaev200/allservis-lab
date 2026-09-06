@@ -40,7 +40,7 @@ export const authEnabled = import.meta.env.VITE_AUTH_ENABLED !== "false";
 /** The upstream providers to render sign-in buttons for. */
 export { GROK_PROVIDERS };
 
-// ── Live-preview bearer token ────────────────────────────────────────────────
+// ── Live-preview bearer token ────────────────────────────────
 // The embedded preview iframe has partitioned cookies, so we keep the session's
 // bearer token in sessionStorage and attach it to every Better Auth request (and
 // to server functions, via `@/lib/auth/middleware`). Empty everywhere except the
@@ -65,6 +65,11 @@ function setBearerToken(token: string | null): void {
   } catch {
     /* storage unavailable — ignore */
   }
+}
+
+/** Persist a Better Auth session token (email/password on HTTP VPS has no Secure cookie). */
+export function persistSessionToken(token: string | null): void {
+  setBearerToken(token);
 }
 
 /**
