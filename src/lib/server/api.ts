@@ -618,18 +618,19 @@ export const deleteClient = createServerFn({ method: "POST" })
     requireAdmin(actor);
     const row = await sql<{ name: string }>`select name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
-    const orders = await sql<{ n: number }>`select count(*)::int as n from as_orders where user_id = ${uid} and client_id = ${data.id}`;
-    if (!n(orders[0]?.n)) {
-      try { await sql`delete from as_payments where user_id = ${uid} and client_id = ${data.id}`; } catch { /* ignore */ }
-      try { await sql`delete from as_reviews where user_id = ${uid} and client_id = ${data.id}`; } catch { /* ignore */ }
-      await sql`delete from as_clients where user_id = ${uid} and id = ${data.id}`;
-    } else {
-      await sql`
-        update as_clients
-        set name = ${"Удалён"}, phone = ${""}, telegram_id = ${null}, blocked = ${false}, paid = ${false}
-        where user_id = ${uid} and id = ${data.id}
-      `;
+    const ids = await sql<{ id: number }>`select id from as_orders where user_id = ${uid} and client_id = ${data.id}`;
+    for (const row of ids) {
+      await sql`delete from as_order_events where user_id = ${uid} and order_id = ${row.id}`;
+      await sql`delete from as_notifications where user_id = ${uid} and order_id = ${row.id}`;
     }
+    try { await sql`delete from as_reviews where user_id = ${uid} and client_id = ${data.id}`; } catch { /* ignore */ }
+    try { await sql`delete from as_payments where user_id = ${uid} and client_id = ${data.id}`; } catch { /* ignore */ }
+    await sql`delete from as_orders where user_id = ${uid} and client_id = ${data.id}`;
+    const tg = await sql<{ telegram_id: string | null }>`select telegram_id from as_clients where user_id = ${uid} and id = ${data.id}`;
+    if (tg[0]?.telegram_id) {
+      await sql`delete from as_tg_sessions where user_id = ${uid} and chat_id = ${tg[0].telegram_id}`;
+    }
+    await sql`delete from as_clients where user_id = ${uid} and id = ${data.id}`;
     await addAudit(sql, uid, "delete_client", "client", String(data.id), row[0].name, "removed");
     return { ok: true as const, error: null };
   });
@@ -652,15 +653,13 @@ export const deleteMaster = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    const active = await sql<{ n: number }>`
-      select count(*)::int as n from as_orders
-      where user_id = ${uid} and master_id = ${data.id}
-        and status in ('assigned','master_accepted','enroute','arrived','in_progress')
-    `;
-    if (n(active[0]?.n)) return { ok: false as const, error: "Сначала закройте активные заявки мастера" };
+    await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now(), master_id = null
+      where user_id = ${uid} and master_id = ${data.id} and status in ('assigned','master_accepted','enroute','arrived','in_progress')`;
+    try { await sql`delete from as_reviews where user_id = ${uid} and master_id = ${data.id}`; } catch { /* ignore */ }
     await sql`update as_orders set master_id = null where user_id = ${uid} and master_id = ${data.id}`;
+    await sql`delete from as_notifications where user_id = ${uid} and master_id = ${data.id}`;
     await sql`delete from as_masters where user_id = ${uid} and id = ${data.id}`;
-    await addAudit(sql, uid, "delete_master", "master", String(data.id), null, null);
+    await addAudit(sql, uid, "delete_master", "master", String(data.id), null, "removed");
     return { ok: true as const, error: null };
   });
 
@@ -746,13 +745,18 @@ export const saveRequisites = createServerFn({ method: "POST" })
       const log = await sql<{ bot_token: string | null }>`
         select bot_token from as_bots where user_id = ${uid} and kind = ${"logs"} and bot_token is not null limit 1
       `;
-      if (log[0]?.bot_token) {
+      let alertToken = log[0]?.bot_token ?? null;
+      if (!alertToken) {
+        const main = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
+        alertToken = main[0]?.bot_token ?? null;
+      }
+      if (alertToken) {
         const { sendAlertTest } = await import("./telegram");
-        const sent = await sendAlertTest(log[0].bot_token, alerts);
+        const sent = await sendAlertTest(alertToken, alerts);
         if (!sent.ok) {
           return {
             ok: false as const,
-            error: `${sent.error}. Добавьте бота алертов админом канала (право писать сообщения).`,
+            error: `${sent.error}. Добавьте основного бота (или бота алертов) админом канала, право писать сообщения.`,
           };
         }
       }

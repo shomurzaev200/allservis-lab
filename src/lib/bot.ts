@@ -186,13 +186,33 @@ function roleKeys(lang: Lang | undefined): KeyboardButton[][] {
   ];
 }
 
-function masterOnlineKeys(lang: Lang | undefined): KeyboardButton[][] {
+function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[][] {
+  if (lang === "uz") {
+    return [
+      [{ id: "cmd:jobs", label: "⚡ Buyurtmalar" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 Onlayn" : "⚪️ Oflayn" }],
+      [{ id: "cmd:loc", label: "📍 Lokatsiyani yangilash" }],
+      [{ id: "cmd:profile", label: "👤 Profil / balans" }, { id: "cmd:active", label: "📦 Faol buyurtmalar" }],
+      [{ id: "role:client", label: "👤 Mijoz rejimiga" }],
+    ];
+  }
   return [
-    [
-      { id: "online:on", label: t(lang, "goOnline") },
-      { id: "online:off", label: t(lang, "goOffline") },
-    ],
-    [{ id: "cmd:start", label: t(lang, "menu") }],
+    [{ id: "cmd:jobs", label: "⚡ Доступные заказы" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 На линии" : "⚪️ Офлайн" }],
+    [{ id: "cmd:loc", label: "📍 Обновить локацию" }],
+    [{ id: "cmd:profile", label: "👤 Профиль / баланс" }, { id: "cmd:active", label: "📦 Мои активные заказы" }],
+    [{ id: "role:client", label: "👤 Режим клиента" }],
+  ];
+}
+
+function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
+  if (lang === "uz") {
+    return [
+      [{ id: "cmd:start", label: "🆕 Yangi ariza" }, { id: "cmd:myorders", label: "📋 Mening arizalarim" }],
+      [{ id: "role:master", label: "🛠 Usta bo‘lish" }, { id: "cmd:lang", label: "🌐 Til" }],
+    ];
+  }
+  return [
+    [{ id: "cmd:start", label: "🆕 Новая заявка" }, { id: "cmd:myorders", label: "📋 Мои заявки" }],
+    [{ id: "role:master", label: "🛠 Стать мастером" }, { id: "cmd:lang", label: "🌐 Язык" }],
   ];
 }
 
@@ -301,7 +321,7 @@ function fold(s: string) {
   return s.toLowerCase().replace(/[‘’ʻʼ`']/g, "'").replace(/\s+/g, " ").trim();
 }
 
-function labelToTapId(raw: string): string | null {
+export function labelToTapId(raw: string): string | null {
   const q = fold(raw);
   if (!q) return null;
   if (q === "русский") return "lang:ru";
@@ -321,9 +341,17 @@ function labelToTapId(raw: string): string | null {
   if (q === fold(RU.skipComment) || q === fold(UZ.skipComment)) return "cmt:skip";
   if (q === fold(RU.confirm) || q === "подтвердить") return "confirm:yes";
   if (q === fold(RU.change) || q.includes("измен") || q.includes("zgartir")) return "confirm:no";
-  if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman")) return "online:on";
-  if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn")) return "online:off";
-  if (q === fold(RU.newOrder) || q === fold(UZ.newOrder) || q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:start";
+  if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman") || q.includes("на линии")) return "online:on";
+  if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn") || q.includes("офлайн")) return "online:off";
+  if (q.includes("доступн") || q.startsWith("⚡")) return "cmd:jobs";
+  if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
+  if (q.includes("профиль") || q.includes("profil") || q.includes("баланс")) return "cmd:profile";
+  if (q.includes("активн") || q.includes("faol")) return "cmd:active";
+  if (q.includes("мои заявк") || q.includes("mening ariza")) return "cmd:myorders";
+  if (q.includes("режим клиента") || q.includes("mijoz rejim")) return "role:client";
+  if (q.includes("стать мастером") || q.includes("usta bo")) return "role:master";
+  if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder)) return "cmd:start";
+  if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:start";
   return null;
 }
 
@@ -382,7 +410,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (step === "master_geo" || (draft.role === "master" && (step === "master_phone" || step === "master_geo"))) {
       return {
         userMessage: user("📍"),
-        replies: [bot(t(lang, "masterDone"), { buttons: masterOnlineKeys(lang) })],
+        replies: [bot(t(lang, "masterDone"), { buttons: masterMenuKeys(lang) })],
         step: "idle",
         draft: next,
         registerMaster: true,
@@ -478,7 +506,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     const on = tapId === "online:on";
     return {
       userMessage: user(on ? t(lang, "goOnline") : t(lang, "goOffline")),
-      replies: [bot(on ? t(lang, "nowOnline") : t(lang, "nowOffline"), { buttons: masterOnlineKeys(lang) })],
+      replies: [bot(on ? t(lang, "nowOnline") : t(lang, "nowOffline"), { buttons: masterMenuKeys(lang) })],
       step: "idle",
       draft,
       setOnline: on,
@@ -746,7 +774,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "idle" && draft.role === "master") {
-    return { replies: [bot(t(lang, "masterDone"), { buttons: masterOnlineKeys(lang) })], step: "idle", draft };
+    return { replies: [bot(t(lang, "masterDone"), { buttons: masterMenuKeys(lang) })], step: "idle", draft };
   }
 
   const svc = matchService(raw);
@@ -784,4 +812,11 @@ export function statusReply(status: OrderStatus, masterName?: string | null, lan
         ? [[{ id: "cmd:start", label: t(lang, "newOrder") }]]
         : undefined;
   return bot(clientLabel(status) + extra, { kind: "status", masterName: masterName ?? undefined, buttons });
+}
+
+export function clientMenu(lang?: Lang) {
+  return clientMenuKeys(lang);
+}
+export function masterMenu(lang?: Lang, online = true) {
+  return masterMenuKeys(lang, online);
 }

@@ -1,7 +1,7 @@
 import { getSql } from "@/lib/db";
 import { districtById, serviceById } from "@/lib/catalog";
 import { clientLabel, type OrderStatus } from "@/lib/domain";
-import { emptyDraft, reduceBot, statusReply, type BotEvent } from "@/lib/bot";
+import { emptyDraft, reduceBot, statusReply, clientMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
 import type { Sql } from "./workspace";
@@ -50,6 +50,288 @@ function markup(buttons?: KeyboardButton[][]) {
     ),
     resize_keyboard: true,
   };
+}
+
+function inline(rows: { text: string; data: string }[][]) {
+  return { inline_keyboard: rows.map((row) => row.map((b) => ({ text: b.text, callback_data: b.data.slice(0, 64) }))) };
+}
+
+function jobButtons(orderId: number, status: string) {
+  if (status === "assigned") {
+    return inline([
+      [
+        { text: "✅ Принять", data: `j:a:${orderId}` },
+        { text: "❌ Отклонить", data: `j:r:${orderId}` },
+      ],
+    ]);
+  }
+  if (status === "master_accepted") {
+    return inline([[{ text: "🚗 Выехал", data: `j:e:${orderId}` }]]);
+  }
+  if (status === "enroute") {
+    return inline([[{ text: "📍 Приехал", data: `j:h:${orderId}` }]]);
+  }
+  if (status === "arrived" || status === "in_progress") {
+    return inline([[{ text: "✅ Завершить", data: `j:d:${orderId}` }]]);
+  }
+  return undefined;
+}
+
+function mapsLink(lat?: number | null, lng?: number | null) {
+  if (lat == null || lng == null) return "";
+  return `https://maps.google.com/?q=${lat},${lng}`;
+}
+
+async function notifyMasterOfJob(sql: Sql, uid: string, token: string, orderId: number) {
+  const rows = await sql.query<Record<string, unknown>>(
+    `select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.lat, o.lng,
+            o.comment, o.price, o.master_id, c.name as client_name, c.telegram_id as client_tg,
+            m.telegram_id as master_tg, m.first_name, m.last_name, m.phone as master_phone, m.rating, m.specialization
+     from as_orders o
+     join as_clients c on c.id = o.client_id
+     left join as_masters m on m.id = o.master_id
+     where o.user_id = $1 and o.id = $2`,
+    [uid, orderId],
+  );
+  const o = rows[0];
+  if (!o) return;
+  const masterTg = o.master_tg ? String(o.master_tg) : "";
+  if (!masterTg || !/^\d+$/.test(masterTg)) return;
+  const svc = serviceById(String(o.category_slug ?? ""));
+  const lat = o.lat == null ? null : Number(o.lat);
+  const lng = o.lng == null ? null : Number(o.lng);
+  const text = [
+    `🆕 Заявка №${o.public_no}`,
+    "",
+    `Клиент: ${o.client_name}`,
+    `Телефон: ${o.phone}`,
+    `Район: ${o.district}`,
+    lat != null && lng != null ? `Гео: ${lat.toFixed(5)}, ${lng.toFixed(5)}` : "",
+    lat != null && lng != null ? mapsLink(lat, lng) : "",
+    `Услуга: ${svc?.title ?? o.category_slug}`,
+    `Задача: ${o.description}`,
+    o.comment ? `Комментарий: ${o.comment}` : "",
+    `Сумма: ${Number(o.price ?? 0).toLocaleString("ru-RU")} сум`,
+  ]
+    .filter(Boolean)
+    .join("\n");
+  const kb = jobButtons(Number(o.id), String(o.status));
+  await tg(token, "sendMessage", { chat_id: Number(masterTg), text, reply_markup: kb ?? markup(masterMenu("ru", true)) });
+  if (lat != null && lng != null) {
+    await tg(token, "sendLocation", { chat_id: Number(masterTg), latitude: lat, longitude: lng });
+  }
+}
+
+async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderId: number, status: OrderStatus) {
+  const rows = await sql.query<Record<string, unknown>>(
+    `select o.id, o.public_no, o.status, o.lat, o.lng, o.district, c.telegram_id as client_tg, c.lang,
+            m.first_name, m.last_name, m.phone as master_phone, m.rating, m.specialization, m.avg_minutes
+     from as_orders o
+     join as_clients c on c.id = o.client_id
+     left join as_masters m on m.id = o.master_id
+     where o.user_id = $1 and o.id = $2`,
+    [uid, orderId],
+  );
+  const o = rows[0];
+  if (!o) return;
+  const chat = o.client_tg ? String(o.client_tg) : "";
+  if (!chat || !/^\d+$/.test(chat)) return;
+  const lang = o.lang === "uz" ? "uz" : "ru";
+  const masterName = [o.first_name, o.last_name].filter(Boolean).join(" ") || "мастер";
+  const svc = serviceById(String(o.specialization ?? ""));
+  const eta = nSafe(o.avg_minutes) || svc?.etaMin || 30;
+  const stars = "★".repeat(Math.round(nSafe(o.rating) || 5));
+  const head = clientLabel(status);
+  let extra = "";
+  if (o.first_name && status !== "cancelled" && status !== "master_rejected" && status !== "waiting_admin") {
+    extra = [
+      "",
+      `Мастер: ${masterName}`,
+      o.master_phone ? `Телефон: ${o.master_phone}` : "",
+      `Рейтинг: ${stars} ${Number(o.rating ?? 5).toFixed(1)}`,
+      svc ? `Профиль: ${svc.title}` : "",
+      status === "assigned" || status === "master_accepted" || status === "enroute" ? `Ориентир: ~${eta} мин` : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }
+  const rateKb =
+    status === "completed"
+      ? inline([
+          [
+            { text: "⭐⭐⭐⭐⭐", data: `rate:5:${orderId}` },
+            { text: "⭐⭐⭐⭐", data: `rate:4:${orderId}` },
+          ],
+          [
+            { text: "⭐⭐⭐", data: `rate:3:${orderId}` },
+            { text: "⭐⭐", data: `rate:2:${orderId}` },
+            { text: "⭐", data: `rate:1:${orderId}` },
+          ],
+        ])
+      : undefined;
+  const menu = status === "completed" || status === "cancelled" || status === "master_rejected" ? markup(clientMenu(lang)) : undefined;
+  await tg(token, "sendMessage", {
+    chat_id: Number(chat),
+    text: `${head}\nЗаявка №${o.public_no}${extra}`,
+    reply_markup: rateKb ?? menu ?? undefined,
+  });
+}
+
+async function applyJob(sql: Sql, uid: string, token: string, masterTg: string, data: string) {
+  const parts = data.split(":");
+  const code = parts[1];
+  const orderId = Number(parts[2]);
+  if (!orderId || !code) return;
+  const master = await sql<{ id: number; first_name: string; last_name: string }>`
+    select id, first_name, last_name from as_masters where user_id = ${uid} and telegram_id = ${masterTg} limit 1
+  `;
+  if (!master[0]) {
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Профиль мастера не найден. /start → Я мастер." });
+    return;
+  }
+  const mid = master[0].id;
+  const o = await sql<{ id: number; status: string; public_no: number; master_id: number | null; master_payout: number }>`
+    select id, status, public_no, master_id, master_payout from as_orders where user_id = ${uid} and id = ${orderId}
+  `;
+  if (!o[0] || Number(o[0].master_id) !== mid) {
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта заявка вам не назначена." });
+    return;
+  }
+  const st = String(o[0].status);
+  const { addEvent, addNote } = await import("./workspace");
+  if (code === "a" && st === "assigned") {
+    await sql`update as_orders set status = 'master_accepted', accepted_at = now(), updated_at = now() where id = ${orderId}`;
+    await sql`update as_masters set accepted_orders = accepted_orders + 1, online_status = 'busy', last_seen = now() where id = ${mid}`;
+    await addEvent(sql, uid, orderId, "master_accepted", "master", {});
+    await tg(token, "sendMessage", {
+      chat_id: Number(masterTg),
+      text: `Приняли №${o[0].public_no}. Когда выедете — нажмите кнопку.`,
+      reply_markup: jobButtons(orderId, "master_accepted"),
+    });
+    await notifyClientOfMaster(sql, uid, token, orderId, "master_accepted");
+  } else if (code === "r" && st === "assigned") {
+    await sql`update as_orders set status = 'master_rejected', updated_at = now() where id = ${orderId}`;
+    await sql`update as_masters set rejected_orders = rejected_orders + 1, last_seen = now() where id = ${mid}`;
+    await addEvent(sql, uid, orderId, "master_rejected", "master", { masterId: mid });
+    await addNote(sql, uid, "admin", `Мастер отказался от заявки №${o[0].public_no}`, "Назначьте другого", orderId, null);
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Отказ принят. Ждите следующую заявку.", reply_markup: markup(masterMenu("ru", true)) });
+    await notifyClientOfMaster(sql, uid, token, orderId, "master_rejected");
+  } else if (code === "e" && st === "master_accepted") {
+    await sql`update as_orders set status = 'enroute', updated_at = now() where id = ${orderId}`;
+    await addEvent(sql, uid, orderId, "enroute", "master", {});
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Клиент видит, что вы выехали.", reply_markup: jobButtons(orderId, "enroute") });
+    await notifyClientOfMaster(sql, uid, token, orderId, "enroute");
+  } else if (code === "h" && st === "enroute") {
+    await sql`update as_orders set status = 'arrived', arrived_at = now(), updated_at = now() where id = ${orderId}`;
+    await addEvent(sql, uid, orderId, "arrived", "master", {});
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "На месте. После работы — «Завершить».", reply_markup: jobButtons(orderId, "arrived") });
+    await notifyClientOfMaster(sql, uid, token, orderId, "arrived");
+  } else if (code === "d" && (st === "arrived" || st === "in_progress")) {
+    await sql`update as_orders set status = 'completed', completed_at = now(), updated_at = now() where id = ${orderId}`;
+    await sql`update as_masters set completed_orders = completed_orders + 1, earnings = earnings + ${nSafe(o[0].master_payout)}, online_status = 'online', last_seen = now() where id = ${mid}`;
+    await addEvent(sql, uid, orderId, "completed", "master", {});
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: `Заявка №${o[0].public_no} завершена. Клиенту ушла оценка.`, reply_markup: markup(masterMenu("ru", true)) });
+    await notifyClientOfMaster(sql, uid, token, orderId, "completed");
+  } else {
+    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
+  }
+}
+
+async function saveStars(sql: Sql, uid: string, token: string, chatId: string, data: string) {
+  const parts = data.split(":");
+  const stars = Number(parts[1]);
+  const orderId = Number(parts[2]);
+  if (!stars || stars < 1 || stars > 5) return;
+  const o = await sql<{ id: number; client_id: number; master_id: number | null; public_no: number }>`
+    select id, client_id, master_id, public_no from as_orders where user_id = ${uid} and id = ${orderId}
+  `;
+  if (!o[0]?.master_id) return;
+  await sql`
+    insert into as_reviews (user_id, order_id, client_id, master_id, rating, comment)
+    values (${uid}, ${orderId}, ${o[0].client_id}, ${o[0].master_id}, ${stars}, ${""})
+  `;
+  await sql`
+    update as_masters set rating = (
+      select round(avg(rating)::numeric, 2) from as_reviews where master_id = ${o[0].master_id}
+    ) where id = ${o[0].master_id}
+  `;
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text: `Спасибо, ${stars} ★. Можете написать отзыв текстом или нажать меню.`,
+    reply_markup: markup(clientMenu("ru")),
+  });
+}
+
+async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: string, tapId: string, loc?: { lat: number; lng: number }) {
+  const m = await sql<{
+    id: number; first_name: string; last_name: string; phone: string; rating: number;
+    earnings: number; completed_orders: number; online_status: string; district: string;
+  }>`
+    select id, first_name, last_name, phone, rating, earnings, completed_orders, online_status, district
+    from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  if (!m[0]) return false;
+  const online = m[0].online_status === "online" || m[0].online_status === "busy";
+  if (tapId === "cmd:loc" && !loc) {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Отправьте геолокацию кнопкой.",
+      reply_markup: markup([[{ id: "geo:share", label: "📍 Отправить геолокацию", requestLocation: true }]]),
+    });
+    return true;
+  }
+  if (loc) {
+    await sql`update as_masters set lat = ${loc.lat}, lng = ${loc.lng}, last_seen = now() where id = ${m[0].id}`;
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Локация обновлена. Вы на карте админки.",
+      reply_markup: markup(masterMenu("ru", online)),
+    });
+    return true;
+  }
+  if (tapId === "online:on" || tapId === "online:off") {
+    const on = tapId === "online:on";
+    await sql`update as_masters set online_status = ${on ? "online" : "offline"}, last_seen = now() where id = ${m[0].id} and online_status <> 'blocked'`;
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: on ? "Вы на линии." : "Офлайн. Новые заказы не в приоритете.",
+      reply_markup: markup(masterMenu("ru", on)),
+    });
+    return true;
+  }
+  if (tapId === "cmd:profile") {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: `${m[0].first_name} ${m[0].last_name}\nТел: ${m[0].phone}\nРайон: ${m[0].district || "—"}\nРейтинг: ${Number(m[0].rating).toFixed(2)}\nЗавершено: ${m[0].completed_orders}\nБаланс: ${Number(m[0].earnings).toLocaleString("ru-RU")} сум\nСтатус: ${m[0].online_status}`,
+      reply_markup: markup(masterMenu("ru", online)),
+    });
+    return true;
+  }
+  if (tapId === "cmd:jobs" || tapId === "cmd:active") {
+    const jobs = await sql<{ id: number; public_no: number; status: string; district: string; description: string }>`
+      select id, public_no, status, district, description from as_orders
+      where user_id = ${uid} and master_id = ${m[0].id}
+        and status in ('assigned','master_accepted','enroute','arrived','in_progress')
+      order by created_at desc limit 10
+    `;
+    if (!jobs.length) {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: "Нет активных заявок. Админ назначит вручную.",
+        reply_markup: markup(masterMenu("ru", online)),
+      });
+      return true;
+    }
+    for (const j of jobs) {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: `№${j.public_no} · ${j.district}\n${j.description}\nСтатус: ${j.status}`,
+        reply_markup: jobButtons(j.id, j.status),
+      });
+    }
+    return true;
+  }
+  return false;
 }
 
 async function setBotCommands(token: string) {
@@ -323,10 +605,11 @@ export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
     if (b.log_chat_id) targets.add(b.log_chat_id.trim());
   }
   try {
-    const ws = await sql<{ alerts_channel_id: string | null }>`
-      select alerts_channel_id from as_workspace where user_id = ${userId}
+    const ws = await sql<{ alerts_channel_id: string | null; bot_token: string | null }>`
+      select alerts_channel_id, bot_token from as_workspace where user_id = ${userId}
     `;
     if (ws[0]?.alerts_channel_id) targets.add(ws[0].alerts_channel_id.trim());
+    if (!token && ws[0]?.bot_token) token = ws[0].bot_token;
   } catch { /* ignore */ }
   if (!token || !targets.size) return;
   for (const chat of targets) {
@@ -621,6 +904,49 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 
   if (await gated(sql, uid, token, chatId, from, msg, cb)) return { ok: true };
 
+  if (cb?.data?.startsWith("j:")) {
+    await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await applyJob(sql, uid, token, chatId, cb.data);
+    return { ok: true };
+  }
+  if (cb?.data?.startsWith("rate:")) {
+    await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await saveStars(sql, uid, token, chatId, cb.data);
+    return { ok: true };
+  }
+
+  const tapGuess = cb?.data ?? (msg?.text ? labelToTapId(msg.text) : null);
+  const masterExists = await sql<{ id: number }>`
+    select id from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  if (masterExists[0] && (tapGuess === "cmd:jobs" || tapGuess === "cmd:active" || tapGuess === "cmd:profile" || tapGuess === "cmd:loc" || tapGuess === "online:on" || tapGuess === "online:off")) {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await handleMasterMenu(sql, uid, token, chatId, tapGuess);
+    return { ok: true };
+  }
+  if (masterExists[0] && msg?.location && (tapGuess === "cmd:loc" || !msg.text)) {
+    const handled = await handleMasterMenu(sql, uid, token, chatId, "cmd:loc", {
+      lat: msg.location.latitude,
+      lng: msg.location.longitude,
+    });
+    if (handled) return { ok: true };
+  }
+
+  if (tapGuess === "cmd:myorders") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const mine = await sql<{ public_no: number; status: string; district: string }>`
+      select o.public_no, o.status, o.district from as_orders o
+      join as_clients c on c.id = o.client_id
+      where o.user_id = ${uid} and c.telegram_id = ${chatId}
+      order by o.created_at desc limit 8
+    `;
+    const lines = mine.length
+      ? mine.map((x) => `№${x.public_no} · ${x.district} · ${x.status}`).join("\n")
+      : "Заявок пока нет.";
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: lines, reply_markup: markup(clientMenu("ru")) });
+    return { ok: true };
+  }
+
   const sess = await sql<{ step: string; draft: string; live_order_id: number | null; last_status: string | null }>`
     select step, draft, live_order_id, last_status from as_tg_sessions where user_id = ${uid} and chat_id = ${chatId}
   `;
@@ -653,6 +979,11 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 
   if (result.registerMaster) {
     await upsertMasterFromBot(sql, uid, chatId, name, draft);
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Меню мастера. Заявки приходят сюда, когда администратор назначит вас.",
+      reply_markup: markup(masterMenu(draft.lang, true)),
+    });
   }
   if (result.setOnline !== undefined) {
     await sql`
@@ -708,8 +1039,8 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
         const reply = statusReply("waiting_admin");
         await tg(token, "sendMessage", {
           chat_id: Number(chatId),
-          text: `${reply.text}\n\nЗаявка №${created.publicNo}\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум\n\nОтмена: /cancel`,
-          reply_markup: markup(reply.buttons),
+          text: `${reply.text}\n\nЗаявка №${created.publicNo}\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум\nОтмена: /cancel`,
+          reply_markup: markup(clientMenu(draft.lang)),
         });
       } catch (err) {
         const msgText = err instanceof Error && err.message === "CLIENT_BLOCKED"
@@ -755,27 +1086,13 @@ export async function pushOrderStatus(sql: Sql, userId: string, orderId: number,
   const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${userId}`;
   const token = ws[0]?.bot_token;
   if (!token) return;
-  const sess = await sql<{ chat_id: string }>`
-    select chat_id from as_tg_sessions where user_id = ${userId} and live_order_id = ${orderId}
-  `;
-  const msg = statusReply(status, masterName);
-  const extra = status === "waiting_admin" || status === "assigned" ? "\nОтмена: /cancel" : "";
-  if (!sess[0]) {
-    const cl = await sql<{ telegram_id: string | null }>`
-      select c.telegram_id from as_orders o join as_clients c on c.id = o.client_id
-      where o.user_id = ${userId} and o.id = ${orderId}
-    `;
-    const tgId = cl[0]?.telegram_id;
-    if (!tgId || !/^\d+$/.test(tgId)) return;
-    await tg(token, "sendMessage", { chat_id: Number(tgId), text: msg.text + extra, reply_markup: markup(msg.buttons) });
-    return;
+  await notifyClientOfMaster(sql, userId, token, orderId, status);
+  if (status === "assigned") {
+    await notifyMasterOfJob(sql, userId, token, orderId);
   }
-  await sql`update as_tg_sessions set last_status = ${status}, updated_at = now() where user_id = ${userId} and live_order_id = ${orderId}`;
-  await tg(token, "sendMessage", {
-    chat_id: Number(sess[0].chat_id),
-    text: msg.text + extra,
-    reply_markup: markup(msg.buttons),
-  });
+  try {
+    await sql`update as_tg_sessions set last_status = ${status}, updated_at = now() where user_id = ${userId} and live_order_id = ${orderId}`;
+  } catch { /* ignore */ }
 }
 
 export { clientLabel };
