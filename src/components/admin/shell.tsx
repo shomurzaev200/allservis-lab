@@ -51,8 +51,8 @@ export function AdminShell({ children }: { children: ReactNode }) {
               access.allowed("invite") ? "приглашать" : null,
               access.allowed("delete") ? "удалять" : null,
               access.allowed("assign") ? "назначать" : null,
-              access.allowed("finance") ? "финансы" : null,
-              access.allowed("bots") ? "боты" : null,
+              access.allowed("finance") ? "пополнения" : null,
+              access.allowed("bots") ? "боты/настройки" : null,
             ].filter(Boolean).join(" · ") || "без доп. прав"}`}
           </p>
           <Link to="/" className="flex min-h-11 items-center gap-2 rounded-md px-3 text-sm text-muted hover:text-fg"><MessageCircle className="size-4" />Telegram-бот (демо)</Link>

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { deleteClient, listClients, setClientBlocked } from "@/lib/server/api";
+import { deleteClient, listClients, setClientBlocked, addManualPayment, revokePayment } from "@/lib/server/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { useAccess } from "@/components/admin/access";
@@ -12,6 +12,7 @@ function ClientsPage() {
   const qc = useQueryClient();
   const access = useAccess();
   const canDelete = access.allowed("delete");
+  const canPay = access.allowed("finance");
   const { data = [], isPending } = useQuery({ queryKey: ["clients"], queryFn: () => listClients() });
   const [q, setQ] = useState("");
   const block = useMutation({
@@ -20,6 +21,14 @@ function ClientsPage() {
   });
   const remove = useMutation({
     mutationFn: (id: number) => deleteClient({ data: { id } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["clients"] }),
+  });
+  const pay = useMutation({
+    mutationFn: (clientId: number) => addManualPayment({ data: { clientId } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["clients"] }),
+  });
+  const unpay = useMutation({
+    mutationFn: (clientId: number) => revokePayment({ data: { clientId } }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["clients"] }),
   });
   const filtered = data.filter((c) =>
@@ -36,6 +45,8 @@ function ClientsPage() {
       </div>
       {remove.data && !remove.data.ok ? <p className="text-sm text-warn">{remove.data.error}</p> : null}
       {block.data && !block.data.ok ? <p className="text-sm text-warn">{block.data.error}</p> : null}
+      {pay.data && !pay.data.ok ? <p className="text-sm text-warn">{pay.data.error}</p> : null}
+      {unpay.data && !unpay.data.ok ? <p className="text-sm text-warn">{unpay.data.error}</p> : null}
       <div className="overflow-x-auto rounded-xl border border-border">
         <table className="w-full min-w-[64rem] text-left text-sm">
           <thead className="bg-surface-2 text-xs uppercase text-muted">
@@ -47,8 +58,9 @@ function ClientsPage() {
               <th className="px-3 py-3">Язык</th>
               <th className="px-3 py-3">Роль</th>
               <th className="px-3 py-3">Заказы</th>
+              <th className="px-3 py-3">Оплата</th>
               <th className="px-3 py-3">Статус</th>
-              {canDelete ? <th className="px-3 py-3" /> : null}
+              {canDelete || canPay ? <th className="px-3 py-3" /> : null}
             </tr>
           </thead>
           <tbody>
@@ -67,14 +79,41 @@ function ClientsPage() {
                 <td className="px-3 py-3 uppercase">{c.lang || "ru"}</td>
                 <td className="px-3 py-3">{c.role === "master" ? "мастер" : "клиент"}</td>
                 <td className="px-3 py-3">{c.orders_count}</td>
+                <td className="px-3 py-3">{c.paid ? <span className="text-ok">оплачен</span> : <span className="text-warn">нет</span>}</td>
                 <td className="px-3 py-3">{c.blocked ? <span className="text-danger">блок</span> : <span className="text-ok">ок</span>}</td>
-                {canDelete ? (
+                {canDelete || canPay ? (
                   <td className="px-3 py-3">
                     <div className="flex flex-wrap gap-2">
-                      <Button size="sm" variant="outline" onClick={() => block.mutate({ id: c.id, blocked: !c.blocked })}>
-                        {c.blocked ? "Разблок" : "Блок"}
-                      </Button>
-                      <Button size="sm" variant="outline" onClick={() => remove.mutate(c.id)}>Удалить</Button>
+                      {canPay ? (
+                        c.paid ? (
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            onClick={() => {
+                              if (window.confirm(`Отменить оплату «${c.name}»? Бот снова попросит перевод.`)) unpay.mutate(c.id);
+                            }}
+                          >
+                            Отменить оплату
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            onClick={() => {
+                              if (window.confirm(`Открыть доступ «${c.name}» без скрина?`)) pay.mutate(c.id);
+                            }}
+                          >
+                            Пополнить
+                          </Button>
+                        )
+                      ) : null}
+                      {canDelete ? (
+                        <>
+                          <Button size="sm" variant="outline" onClick={() => block.mutate({ id: c.id, blocked: !c.blocked })}>
+                            {c.blocked ? "Разблок" : "Блок"}
+                          </Button>
+                          <Button size="sm" variant="outline" onClick={() => remove.mutate(c.id)}>Удалить</Button>
+                        </>
+                      ) : null}
                     </div>
                   </td>
                 ) : null}

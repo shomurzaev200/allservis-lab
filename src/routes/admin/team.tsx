@@ -8,6 +8,14 @@ import { useAccess } from "@/components/admin/access";
 
 export const Route = createFileRoute("/admin/team")({ component: TeamPage });
 
+const PERM_ITEMS = [
+  ["can_invite", "Приглашать сотрудников"],
+  ["can_delete", "Удалять / блокировать клиентов и мастеров"],
+  ["can_assign", "Назначать мастеров и отменять заявки"],
+  ["can_finance", "Пополнения: подтверждать скрины, добавлять и отменять оплату"],
+  ["can_bots", "Боты, обязательная подписка, реквизиты, настройки, реклама"],
+] as const;
+
 function TeamPage() {
   const qc = useQueryClient();
   const access = useAccess();
@@ -61,6 +69,17 @@ function TeamPage() {
         </p>
       </div>
 
+      <section className="rounded-xl border border-border bg-surface-2/40 px-4 py-3 text-sm">
+        <p className="font-medium">Что можно выдать сотруднику</p>
+        <ul className="mt-2 list-disc space-y-1 pl-5 text-muted">
+          <li><b className="text-fg">Приглашать</b> — добавлять других в «Команда».</li>
+          <li><b className="text-fg">Удалять / блокировать</b> — клиентов и мастеров, без восстановления заявок.</li>
+          <li><b className="text-fg">Назначать и отменять</b> — вручную ставить мастера на заявку и отменять заказ.</li>
+          <li><b className="text-fg">Пополнения</b> — подтверждать скрины, вручную открывать доступ клиенту и отменять оплату (бот снова попросит перевод).</li>
+          <li><b className="text-fg">Боты / настройки</b> — токены, обязательная подписка на канал, реквизиты, рекламные ссылки.</li>
+        </ul>
+      </section>
+
       {canInvite ? (
         <section className="glass-card space-y-3 rounded-xl p-5">
           <h2 className="font-medium">Выдать доступ</h2>
@@ -68,12 +87,12 @@ function TeamPage() {
           <Input placeholder="Имя" value={name} onChange={(e) => setName(e.target.value)} />
           <Input type="password" placeholder="Пароль (мин. 8 символов)" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
           {owner ? (
-            <div className="grid gap-2 text-sm sm:grid-cols-2">
-              <label className="flex items-center gap-2"><input type="checkbox" checked={invite} onChange={(e) => setInvite(e.target.checked)} />Может приглашать других</label>
+            <div className="grid gap-2 text-sm sm:grid-cols-1">
+              <label className="flex items-center gap-2"><input type="checkbox" checked={invite} onChange={(e) => setInvite(e.target.checked)} />Приглашать сотрудников</label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={del} onChange={(e) => setDel(e.target.checked)} />Удалять / блокировать клиентов и мастеров</label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={assign} onChange={(e) => setAssign(e.target.checked)} />Назначать мастеров и отменять заявки</label>
-              <label className="flex items-center gap-2"><input type="checkbox" checked={finance} onChange={(e) => setFinance(e.target.checked)} />Финансы / пополнения</label>
-              <label className="flex items-center gap-2"><input type="checkbox" checked={bots} onChange={(e) => setBots(e.target.checked)} />Боты, настройки, рекламные ссылки</label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={finance} onChange={(e) => setFinance(e.target.checked)} />Пополнения: подтверждать скрины, добавлять и отменять оплату</label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={bots} onChange={(e) => setBots(e.target.checked)} />Боты, обязательная подписка, реквизиты, настройки, реклама</label>
             </div>
           ) : (
             <p className="text-sm text-muted">Новый сотрудник войдёт без доп. прав. Права выдаёт только владелец.</p>
@@ -111,38 +130,36 @@ function TeamPage() {
                 <td className="px-3 py-3 text-xs">
                   {s.role === "owner" ? <span className="text-muted">все права</span> : owner ? (
                     <div className="flex flex-col gap-1">
-                      {([
-                        ["can_invite", "приглашать", s.can_invite],
-                        ["can_delete", "удалять", s.can_delete],
-                        ["can_assign", "назначать", s.can_assign],
-                        ["can_finance", "финансы", s.can_finance],
-                        ["can_bots", "боты", s.can_bots],
-                      ] as const).map(([key, label, on]) => (
-                        <label key={key} className="flex items-center gap-2">
-                          <input
-                            type="checkbox"
-                            checked={Boolean(on)}
-                            onChange={() => perms.mutate({
-                              id: s.id,
-                              can_invite: key === "can_invite" ? !s.can_invite : Boolean(s.can_invite),
-                              can_delete: key === "can_delete" ? !s.can_delete : Boolean(s.can_delete),
-                              can_assign: key === "can_assign" ? !s.can_assign : Boolean(s.can_assign),
-                              can_finance: key === "can_finance" ? !s.can_finance : Boolean(s.can_finance),
-                              can_bots: key === "can_bots" ? !s.can_bots : Boolean(s.can_bots),
-                            })}
-                          />
-                          {label}
-                        </label>
-                      ))}
+                      {PERM_ITEMS.map(([key, label]) => {
+                        const on = Boolean(s[key]);
+                        return (
+                          <label key={key} className="flex items-start gap-2">
+                            <input
+                              className="mt-0.5"
+                              type="checkbox"
+                              checked={on}
+                              onChange={() => perms.mutate({
+                                id: s.id,
+                                can_invite: key === "can_invite" ? !s.can_invite : Boolean(s.can_invite),
+                                can_delete: key === "can_delete" ? !s.can_delete : Boolean(s.can_delete),
+                                can_assign: key === "can_assign" ? !s.can_assign : Boolean(s.can_assign),
+                                can_finance: key === "can_finance" ? !s.can_finance : Boolean(s.can_finance),
+                                can_bots: key === "can_bots" ? !s.can_bots : Boolean(s.can_bots),
+                              })}
+                            />
+                            {label}
+                          </label>
+                        );
+                      })}
                     </div>
                   ) : (
                     <span className="text-muted">
                       {[
                         s.can_invite ? "приглашать" : null,
-                        s.can_delete ? "удалять" : null,
-                        s.can_assign ? "назначать" : null,
-                        s.can_finance ? "финансы" : null,
-                        s.can_bots ? "боты" : null,
+                        s.can_delete ? "удалять / блокировать" : null,
+                        s.can_assign ? "назначать / отменять" : null,
+                        s.can_finance ? "пополнения: добавить / отменить" : null,
+                        s.can_bots ? "боты / подписка / настройки" : null,
                       ].filter(Boolean).join(" · ") || "без доп. прав"}
                     </span>
                   )}

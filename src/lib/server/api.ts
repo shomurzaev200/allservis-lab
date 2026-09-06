@@ -35,6 +35,7 @@ export type ClientListRow = {
   rating: number; blocked: boolean; created_at: string; last_active: string | null;
   orders_count: number; completed_count: number; cancelled_count: number;
   lang: string; role: string; lat: number | null; lng: number | null;
+  paid: boolean; paid_at: string | null;
 };
 export type ReviewListRow = { id: number; rating: number; comment: string; created_at: string; public_no: number; client_name: string | null; master_name: string | null };
 export type AuditRow = { id: number; action: string; object_type: string; object_id: string; old_value: string | null; new_value: string | null; created_at: string };
@@ -316,7 +317,9 @@ export const listClients = createServerFn({ method: "GET" })
         count(o.id) filter (where o.status = 'cancelled')::int as cancelled_count,
         coalesce(cl.lang, 'ru') as lang,
         coalesce(cl.role, 'client') as role,
-        cl.lat, cl.lng
+        cl.lat, cl.lng,
+        coalesce(cl.paid, false) as paid,
+        cl.paid_at
       from as_clients cl
       left join as_orders o on o.client_id = cl.id
       where cl.user_id = ${uid}
@@ -971,6 +974,12 @@ export const reviewPayment = createServerFn({ method: "POST" })
       } else if (row[0].telegram_id) {
         await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and telegram_id = ${row[0].telegram_id}`;
       }
+    } else {
+      if (row[0].client_id) {
+        await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and id = ${row[0].client_id}`;
+      } else if (row[0].telegram_id) {
+        await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and telegram_id = ${row[0].telegram_id}`;
+      }
     }
     await addAudit(sql, uid, data.approve ? "approve_pay" : "reject_pay", "payment", String(data.id), null, row[0].client_name, who(actor));
     const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
@@ -993,6 +1002,82 @@ export const reviewPayment = createServerFn({ method: "POST" })
     return { ok: true as const, error: null };
   });
 
+async function notifyClientPay(sql: Awaited<ReturnType<typeof getSql>>, uid: string, chat: string | null, text: string) {
+  if (!chat || !/^\d+$/.test(chat)) return;
+  const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
+  const token = ws[0]?.bot_token;
+  if (!token) return;
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ chat_id: Number(chat), text }),
+    });
+  } catch { /* ignore */ }
+}
+
+export const addManualPayment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { clientId: number; amount?: number }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    if (!can(actor, "finance")) return { ok: false as const, error: NO_PERM };
+    const client = await sql<{ id: number; name: string; telegram_id: string | null; paid: boolean }>`
+      select id, name, telegram_id, paid from as_clients where user_id = ${uid} and id = ${data.clientId}
+    `;
+    if (!client[0]) return { ok: false as const, error: "Клиент не найден" };
+    let amount = Math.max(0, Math.round(Number(data.amount ?? 0) || 0));
+    if (!amount) {
+      const ws = await sql<{ pay_amount: number }>`select pay_amount from as_workspace where user_id = ${uid}`;
+      amount = n(ws[0]?.pay_amount);
+    }
+    await sql`
+      insert into as_payments (user_id, client_id, telegram_id, client_name, amount, screenshot, status, reviewed_at)
+      values (${uid}, ${client[0].id}, ${client[0].telegram_id}, ${client[0].name}, ${amount}, ${"manual"}, ${"approved"}, now())
+    `;
+    await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and id = ${client[0].id}`;
+    await addAudit(sql, uid, "add_pay", "client", String(client[0].id), null, `${client[0].name} · ${amount}`, who(actor));
+    await notifyClientPay(sql, uid, client[0].telegram_id, "Оплата подтверждена администратором. Напишите /start — можно создавать заявки.");
+    return { ok: true as const, error: null };
+  });
+
+export const revokePayment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { id?: number; clientId?: number }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    if (!can(actor, "finance")) return { ok: false as const, error: NO_PERM };
+    let clientId = data.clientId ?? null;
+    let telegramId: string | null = null;
+    let name = "";
+    if (data.id) {
+      const row = await sql<{ id: number; client_id: number | null; telegram_id: string | null; client_name: string }>`
+        select id, client_id, telegram_id, client_name from as_payments where user_id = ${uid} and id = ${data.id}
+      `;
+      if (!row[0]) return { ok: false as const, error: "Платёж не найден" };
+      await sql`update as_payments set status = ${"cancelled"}, reviewed_at = now() where user_id = ${uid} and id = ${data.id}`;
+      clientId = row[0].client_id;
+      telegramId = row[0].telegram_id;
+      name = row[0].client_name;
+    }
+    if (clientId) {
+      const c = await sql<{ name: string; telegram_id: string | null }>`
+        select name, telegram_id from as_clients where user_id = ${uid} and id = ${clientId}
+      `;
+      await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and id = ${clientId}`;
+      await sql`update as_payments set status = ${"cancelled"} where user_id = ${uid} and client_id = ${clientId} and status = ${"approved"}`;
+      name = c[0]?.name || name;
+      telegramId = c[0]?.telegram_id ?? telegramId;
+    } else if (telegramId) {
+      await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and telegram_id = ${telegramId}`;
+    }
+    await addAudit(sql, uid, "revoke_pay", "client", String(clientId ?? data.id ?? ""), name, "cancelled", who(actor));
+    await notifyClientPay(sql, uid, telegramId, "Пополнение отменено администратором. Чтобы снова вызывать мастера — оплатите доступ.");
+    return { ok: true as const, error: null };
+  });
+
 export const setMasterOnline = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((d: { masterId: number; online: boolean }) => d)
@@ -1010,7 +1095,9 @@ export const setStaffPerms = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireOwner(actor);
-    const row = await sql<{ role: string }>`select role from as_staff where workspace_id = ${uid} and id = ${data.id}`;
+    const row = await sql<{ role: string; email: string; name: string }>`
+      select role, email, name from as_staff where workspace_id = ${uid} and id = ${data.id}
+    `;
     if (!row[0]) return { ok: false as const, error: "Не найден" };
     if (row[0].role === "owner") return { ok: false as const, error: "Права владельца нельзя менять" };
     await sql`
@@ -1022,6 +1109,14 @@ export const setStaffPerms = createServerFn({ method: "POST" })
         can_bots = ${Boolean(data.can_bots)}
       where id = ${data.id} and workspace_id = ${uid}
     `;
+    const flags = [
+      data.can_invite ? "приглашать" : null,
+      data.can_delete ? "удалять" : null,
+      data.can_assign ? "назначать" : null,
+      data.can_finance ? "пополнения" : null,
+      data.can_bots ? "боты" : null,
+    ].filter(Boolean).join(", ") || "без прав";
+    await addAudit(sql, uid, "set_perms", "staff", String(data.id), row[0].email, flags, who(actor));
     return { ok: true as const, error: null };
   });
 

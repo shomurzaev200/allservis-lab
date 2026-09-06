@@ -943,6 +943,9 @@ const ACTION_RU: Record<string, string> = {
   save_requisites: "Изменил настройки / реквизиты / канал",
   approve_pay: "Подтвердил оплату",
   reject_pay: "Отклонил оплату",
+  add_pay: "Добавил пополнение счёта",
+  revoke_pay: "Отменил пополнение счёта",
+  set_perms: "Изменил права сотрудника",
   cancelled: "Отменил заявку",
 };
 
