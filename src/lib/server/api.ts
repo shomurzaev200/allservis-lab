@@ -26,7 +26,7 @@ export type OrderRow = {
   price: number; master_payout: number; created_at: string; assigned_at: string | null;
   accepted_at: string | null; arrived_at: string | null; started_at: string | null;
   completed_at: string | null; cancelled_at: string | null; updated_at: string;
-  client_name: string; master_name: string | null; client_tg: string | null;
+  client_name: string; master_name: string | null; client_tg: string | null; client_rating: number;
 };
 export type NoteRow = { id: number; kind: string; title: string; body: string; order_id: number | null; master_id: number | null; read: boolean; created_at: string };
 export type EventRow = { id: number; event_type: string; actor: string; metadata: string; created_at: string };
@@ -72,11 +72,12 @@ function mapOrder(r: Record<string, unknown>): OrderRow {
     updated_at: String(r.updated_at), client_name: String(r.client_name ?? ""),
     master_name: r.master_name ? String(r.master_name) : null,
     client_tg: r.client_tg ? String(r.client_tg) : null,
+    client_rating: n(r.client_rating),
   };
 }
 
 const ORDER_SELECT = `
-  o.*, c.name as client_name, c.telegram_id as client_tg,
+  o.*, c.name as client_name, c.telegram_id as client_tg, coalesce(c.rating, 5) as client_rating,
   case when m.id is null then null else m.first_name || ' ' || m.last_name end as master_name
 `;
 
@@ -99,14 +100,18 @@ export const getDashboard = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     const [clients, masters, orders, finance] = await Promise.all([
-      sql<{ total: number; today: number }>`select count(*)::int as total, count(*) filter (where created_at >= current_date)::int as today from as_clients where user_id = ${uid}`,
+      sql<{ total: number; today: number; returning: number }>`
+        select count(*)::int as total,
+          count(*) filter (where created_at >= current_date)::int as today,
+          count(*) filter (where (select count(*) from as_orders o where o.client_id = as_clients.id) > 1)::int as returning
+        from as_clients where user_id = ${uid}`,
       sql<{ total: number; online: number; busy: number; offline: number }>`
         select count(*)::int as total,
           count(*) filter (where online_status = 'online')::int as online,
           count(*) filter (where online_status = 'busy')::int as busy,
           count(*) filter (where online_status = 'offline')::int as offline
         from as_masters where user_id = ${uid}`,
-      sql<{ total: number; today: number; week: number; waiting: number; assigned: number; work: number; done: number; cancelled: number }>`
+      sql<{ total: number; today: number; week: number; waiting: number; assigned: number; work: number; done: number; cancelled: number; rejected: number }>`
         select count(*)::int as total,
           count(*) filter (where created_at >= current_date)::int as today,
           count(*) filter (where created_at >= current_date - interval '7 days')::int as week,
@@ -114,7 +119,8 @@ export const getDashboard = createServerFn({ method: "GET" })
           count(*) filter (where status = 'assigned')::int as assigned,
           count(*) filter (where status in ('master_accepted','enroute','arrived','in_progress'))::int as work,
           count(*) filter (where status = 'completed')::int as done,
-          count(*) filter (where status = 'cancelled')::int as cancelled
+          count(*) filter (where status = 'cancelled')::int as cancelled,
+          count(*) filter (where status = 'master_rejected')::int as rejected
         from as_orders where user_id = ${uid}`,
       sql<{ today: number; week: number; month: number; avg: number; payout: number }>`
         select coalesce(sum(price) filter (where status = 'completed' and completed_at >= current_date), 0)::int as today,
@@ -129,15 +135,45 @@ export const getDashboard = createServerFn({ method: "GET" })
       [uid],
     );
     const notes = await sql<NoteRow>`select id, kind, title, body, order_id, master_id, read, created_at from as_notifications where user_id = ${uid} order by created_at desc limit 8`;
-    const bot = await sql<{ bot_username: string | null; webhook_id: string | null }>`select bot_username, webhook_id from as_workspace where user_id = ${uid}`;
+    let bot: { username: string | null; connected: boolean; mode: string | null } = { username: null, connected: false, mode: null };
+    try {
+      const row = await sql<{ bot_username: string | null; webhook_id: string | null; poll_mode: boolean }>`
+        select bot_username, webhook_id, poll_mode from as_workspace where user_id = ${uid}`;
+      bot = {
+        username: row[0]?.bot_username ?? null,
+        connected: Boolean(row[0]?.bot_username),
+        mode: row[0]?.poll_mode ? "polling" : row[0]?.webhook_id ? "webhook" : null,
+      };
+    } catch { /* migration pending */ }
     return {
-      clients: { ...clients[0]!, active: n(clients[0]?.total) },
-      masters: masters[0]!,
-      orders: orders[0]!,
-      finance: finance[0]!,
+      clients: { total: n(clients[0]?.total), today: n(clients[0]?.today), returning: n(clients[0]?.returning), active: n(clients[0]?.total) },
+      masters: {
+        total: n(masters[0]?.total),
+        online: n(masters[0]?.online),
+        busy: n(masters[0]?.busy),
+        offline: n(masters[0]?.offline),
+      },
+      orders: {
+        total: n(orders[0]?.total),
+        today: n(orders[0]?.today),
+        week: n(orders[0]?.week),
+        waiting: n(orders[0]?.waiting),
+        assigned: n(orders[0]?.assigned),
+        work: n(orders[0]?.work),
+        done: n(orders[0]?.done),
+        cancelled: n(orders[0]?.cancelled),
+        rejected: n(orders[0]?.rejected),
+      },
+      finance: {
+        today: n(finance[0]?.today),
+        week: n(finance[0]?.week),
+        month: n(finance[0]?.month),
+        avg: n(finance[0]?.avg),
+        payout: n(finance[0]?.payout),
+      },
       recent: recentOrders.map(mapOrder),
       notifications: notes,
-      bot: { username: bot[0]?.bot_username ?? null, connected: Boolean(bot[0]?.webhook_id && bot[0]?.bot_username) },
+      bot,
       role: actor.role,
     };
   });
@@ -389,12 +425,22 @@ export const getAnalytics = createServerFn({ method: "GET" })
     const byCat = await sql<{ slug: string; n: number }>`select category_slug as slug, count(*)::int as n from as_orders where user_id = ${uid} group by 1 order by n desc`;
     const byCity = await sql<{ district: string; n: number }>`select district, count(*)::int as n from as_orders where user_id = ${uid} group by 1 order by n desc`;
     const ratings = await sql<{ rating: number; n: number }>`select rating, count(*)::int as n from as_reviews where user_id = ${uid} group by 1 order by 1`;
+    const byHour = await sql<{ h: number; n: number }>`
+      select extract(hour from created_at)::int as h, count(*)::int as n
+      from as_orders where user_id = ${uid} group by 1 order by 1`;
     const funnel = await sql<{ created: number; assigned: number; accepted: number; completed: number; cancelled: number }>`
       select count(*)::int as created, count(*) filter (where assigned_at is not null)::int as assigned,
         count(*) filter (where accepted_at is not null)::int as accepted,
         count(*) filter (where status = 'completed')::int as completed,
         count(*) filter (where status = 'cancelled')::int as cancelled from as_orders where user_id = ${uid}`;
-    return { byDay, byCat, byCity, ratings, funnel: funnel[0]! };
+    return {
+      byDay: byDay ?? [],
+      byCat: byCat ?? [],
+      byCity: byCity ?? [],
+      ratings: ratings ?? [],
+      byHour: byHour ?? [],
+      funnel: funnel[0] ?? { created: 0, assigned: 0, accepted: 0, completed: 0, cancelled: 0 },
+    };
   });
 
 export const listReviews = createServerFn({ method: "GET" }).middleware([authMiddleware]).handler(async ({ context }) => {
@@ -431,17 +477,29 @@ export const getBotSettings = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
-    const row = await sql<{ bot_username: string | null; webhook_id: string | null; bot_connected_at: string | null; bot_token: string | null }>`
-      select bot_username, webhook_id, bot_connected_at, bot_token from as_workspace where user_id = ${uid}`;
+    const row = await sql<{
+      bot_username: string | null; webhook_id: string | null; bot_connected_at: string | null; bot_token: string | null;
+      poll_mode: boolean; channel_username: string | null; pay_card: string | null; pay_bank: string | null;
+      pay_holder: string | null; pay_amount: number;
+    }>`
+      select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
+        channel_username, pay_card, pay_bank, pay_holder, pay_amount
+      from as_workspace where user_id = ${uid}`;
     const w = row[0];
     const token = w?.bot_token ?? "";
     const masked = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : null;
     return {
-      connected: Boolean(w?.bot_username && w?.webhook_id),
+      connected: Boolean(w?.bot_username),
       username: w?.bot_username ?? null,
       webhookId: w?.webhook_id ?? null,
       connectedAt: w?.bot_connected_at ?? null,
       tokenMasked: masked,
+      pollMode: Boolean(w?.poll_mode),
+      channel: w?.channel_username ?? "",
+      payCard: w?.pay_card ?? "",
+      payBank: w?.pay_bank ?? "",
+      payHolder: w?.pay_holder ?? "",
+      payAmount: n(w?.pay_amount),
       role: actor.role,
       email: actor.email,
     };
@@ -649,6 +707,90 @@ export const removeServiceBot = createServerFn({ method: "POST" })
     await disconnectBotById(sql, uid, data.id);
     await addAudit(sql, uid, "remove_bot", "bot", String(data.id), null, null);
     return { ok: true as const };
+  });
+
+export const saveRequisites = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { channel?: string; payCard?: string; payBank?: string; payHolder?: string; payAmount?: number }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    const channel = (data.channel ?? "").replace(/^@/, "").trim();
+    const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
+    await sql`
+      update as_workspace set
+        channel_username = ${channel || null},
+        pay_card = ${data.payCard?.trim() || null},
+        pay_bank = ${data.payBank?.trim() || null},
+        pay_holder = ${data.payHolder?.trim() || null},
+        pay_amount = ${amount}
+      where user_id = ${uid}
+    `;
+    await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites");
+    return { ok: true as const };
+  });
+
+export const listPayments = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    return sql<{
+      id: number; client_name: string; telegram_id: string | null; amount: number; screenshot: string;
+      status: string; created_at: string; client_id: number | null;
+    }>`
+      select id, client_name, telegram_id, amount, screenshot, status, created_at, client_id
+      from as_payments where user_id = ${uid} order by created_at desc limit 80
+    `;
+  });
+
+export const reviewPayment = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { id: number; approve: boolean }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    const row = await sql<{ id: number; telegram_id: string | null; client_id: number | null; client_name: string; status: string }>`
+      select id, telegram_id, client_id, client_name, status from as_payments where user_id = ${uid} and id = ${data.id}
+    `;
+    if (!row[0]) return { ok: false as const, error: "Платёж не найден" };
+    const status = data.approve ? "approved" : "rejected";
+    await sql`update as_payments set status = ${status}, reviewed_at = now() where id = ${data.id} and user_id = ${uid}`;
+    if (data.approve) {
+      if (row[0].client_id) {
+        await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and id = ${row[0].client_id}`;
+      } else if (row[0].telegram_id) {
+        await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and telegram_id = ${row[0].telegram_id}`;
+      }
+    }
+    await addAudit(sql, uid, data.approve ? "approve_pay" : "reject_pay", "payment", String(data.id), null, row[0].client_name);
+    const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
+    const token = ws[0]?.bot_token;
+    const chat = row[0].telegram_id;
+    if (token && chat && /^\d+$/.test(chat)) {
+      try {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            chat_id: Number(chat),
+            text: data.approve
+              ? "Оплата подтверждена. Напишите /start — можно создавать заявки."
+              : "Оплата не принята. Пришлите корректный скрин перевода.",
+          }),
+        });
+      } catch { /* ignore */ }
+    }
+    return { ok: true as const, error: null };
+  });
+
+export const setMasterOnline = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { masterId: number; online: boolean }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const status = data.online ? "online" : "offline";
+    await sql`update as_masters set online_status = ${status}, last_seen = now() where user_id = ${uid} and id = ${data.masterId} and online_status <> 'blocked'`;
+    return { ok: true as const, status };
   });
 
 export { SERVICES, clientLabel };

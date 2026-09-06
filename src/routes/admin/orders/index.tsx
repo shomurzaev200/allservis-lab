@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useQuery } from "@tanstack/react-query";
-import { listOrders } from "@/lib/server/api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { cancelOrder, listOrders } from "@/lib/server/api";
 import { OrderBadge } from "@/components/admin/status-badge";
 import { AssignDialog } from "@/components/admin/assign-dialog";
 import { ORDER_STATUSES, STATUS_LABEL } from "@/lib/domain";
@@ -24,9 +24,14 @@ function OrdersPage() {
   const [status, setStatus] = useState(search.status ?? "all");
   const [q, setQ] = useState(search.q ?? "");
   const [assign, setAssign] = useState<{ id: number; no: number; name: string } | null>(null);
+  const qc = useQueryClient();
   const { data = [], isPending } = useQuery({
     queryKey: ["orders", status, q],
     queryFn: () => listOrders({ data: { status, q } }),
+  });
+  const cancel = useMutation({
+    mutationFn: (id: number) => cancelOrder({ data: id }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["orders"] }),
   });
 
   return (
@@ -103,6 +108,11 @@ function OrdersPage() {
                     {o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned" ? (
                       <Button size="sm" onClick={() => setAssign({ id: o.id, no: o.public_no, name: o.client_name })}>
                         Назначить
+                      </Button>
+                    ) : null}
+                    {o.status !== "completed" && o.status !== "cancelled" ? (
+                      <Button size="sm" variant="outline" onClick={() => cancel.mutate(o.id)}>
+                        Отмена
                       </Button>
                     ) : null}
                   </div>

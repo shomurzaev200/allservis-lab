@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { addServiceBot, dropBotToken, getBotSettings, listBots, removeServiceBot, saveBotToken } from "@/lib/server/api";
+import { addServiceBot, dropBotToken, getBotSettings, listBots, removeServiceBot, saveBotToken, saveRequisites } from "@/lib/server/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
@@ -15,6 +15,20 @@ function SettingsPage() {
   const [extraToken, setExtraToken] = useState("");
   const [extraLabel, setExtraLabel] = useState("");
   const [logToken, setLogToken] = useState("");
+  const [channel, setChannel] = useState("");
+  const [payCard, setPayCard] = useState("");
+  const [payBank, setPayBank] = useState("");
+  const [payHolder, setPayHolder] = useState("");
+  const [payAmount, setPayAmount] = useState("0");
+
+  useEffect(() => {
+    if (!data) return;
+    setChannel(data.channel ?? "");
+    setPayCard(data.payCard ?? "");
+    setPayBank(data.payBank ?? "");
+    setPayHolder(data.payHolder ?? "");
+    setPayAmount(String(data.payAmount ?? 0));
+  }, [data]);
 
   const save = useMutation({
     mutationFn: () => saveBotToken({ data: { token, publicOrigin: window.location.origin } }),
@@ -40,6 +54,12 @@ function SettingsPage() {
     mutationFn: (id: number) => removeServiceBot({ data: { id } }),
     onSuccess: () => qc.invalidateQueries(),
   });
+  const reqs = useMutation({
+    mutationFn: () => saveRequisites({
+      data: { channel, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0 },
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
+  });
 
   const clientBots = bots.filter((b) => b.kind === "client");
   const logBot = bots.find((b) => b.kind === "logs");
@@ -48,23 +68,29 @@ function SettingsPage() {
     <div className="mx-auto max-w-2xl space-y-6 p-4 md:p-6">
       <div>
         <p className="text-xs uppercase tracking-wider text-accent">Подключение</p>
-        <h1 className="font-display text-2xl">Боты и доступ</h1>
+        <h1 className="font-display text-2xl">Боты, реквизиты, канал</h1>
         <p className="mt-2 text-sm text-muted">
-          Основной бот — заявки клиентов. Можно добавить второй клиентский бот. Отдельный бот логов шлёт события владельцу в Telegram.
-          Команда: <Link to="/admin/team" className="text-accent">Команда</Link>.
+          Основной бот — заявки. HTTPS не обязателен: на HTTP сервере бот работает через polling.
+          Команда: <Link to="/admin/team" className="text-accent">Команда</Link>. Оплаты:{" "}
+          <Link to="/admin/payments" className="text-accent">Пополнения</Link>.
         </p>
       </div>
 
       <section className="glass-card space-y-4 rounded-xl p-5">
         <h2 className="font-medium">Основной бот заявок</h2>
         <ol className="list-decimal space-y-2 pl-5 text-sm leading-relaxed text-muted">
-          <li>Telegram → <span className="text-fg">@BotFather</span> → /newbot</li>
-          <li>Вставьте токен и нажмите «Подключить бота»</li>
+          <li>Telegram → <span className="text-fg">@BotFather</span> → /newbot (например AllServisTashkentBot)</li>
+          <li>Скопируйте токен вида <span className="font-mono text-fg">123456789:AAHxxxx</span></li>
+          <li>Вставьте сюда и нажмите «Подключить бота». В .env токен класть не нужно.</li>
+          <li>Откройте бота в Telegram и напишите /start</li>
         </ol>
         {data?.connected ? (
           <div className="rounded-lg bg-ok/10 px-4 py-3 text-sm">
             <p className="font-medium text-ok">Подключен @{data.username}</p>
             <p className="mt-1 text-xs text-muted">Токен: {data.tokenMasked}</p>
+            <p className="mt-1 text-xs text-muted">
+              Режим: {data.pollMode ? "polling (HTTP, без домена — так и должно быть)" : "webhook HTTPS"}
+            </p>
           </div>
         ) : (
           <p className="rounded-lg bg-warn/10 px-4 py-3 text-sm text-warn">Основной бот ещё не подключён.</p>
@@ -75,7 +101,12 @@ function SettingsPage() {
             value={token} onChange={(e) => setToken(e.target.value)} />
         </label>
         {save.data && !save.data.ok ? <p className="text-sm text-danger">{save.data.error}</p> : null}
-        {save.data?.ok ? <p className="text-sm text-ok">Готово. Бот @{save.data.username}.</p> : null}
+        {save.data?.ok ? (
+          <p className="text-sm text-ok">
+            Готово. Бот @{save.data.username}
+            {save.data.mode === "polling" ? " работает без HTTPS (polling)." : "."}
+          </p>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           <Button disabled={!token || save.isPending} onClick={() => save.mutate()}>
             {save.isPending ? "Подключаю…" : "Подключить бота"}
@@ -84,6 +115,38 @@ function SettingsPage() {
             <Button variant="outline" disabled={drop.isPending} onClick={() => drop.mutate()}>Отключить</Button>
           ) : null}
         </div>
+      </section>
+
+      <section className="glass-card space-y-4 rounded-xl p-5">
+        <h2 className="font-medium">Реквизиты и обязательная подписка</h2>
+        <p className="text-sm text-muted">
+          Если указать карту или сумму — клиент должен прислать скрин перевода, пока вы не подтвердите в «Пополнения».
+          Канал: бот должен быть админом канала.
+        </p>
+        <label className="block text-sm">
+          <span className="text-muted">Канал без @</span>
+          <Input className="mt-1" placeholder="allservis_uz" value={channel} onChange={(e) => setChannel(e.target.value)} />
+        </label>
+        <label className="block text-sm">
+          <span className="text-muted">Банк</span>
+          <Input className="mt-1" placeholder="Uzcard / Humo / Click" value={payBank} onChange={(e) => setPayBank(e.target.value)} />
+        </label>
+        <label className="block text-sm">
+          <span className="text-muted">Номер карты</span>
+          <Input className="mt-1 font-mono" placeholder="8600 **** **** 1234" value={payCard} onChange={(e) => setPayCard(e.target.value)} />
+        </label>
+        <label className="block text-sm">
+          <span className="text-muted">Получатель</span>
+          <Input className="mt-1" placeholder="Имя на карте" value={payHolder} onChange={(e) => setPayHolder(e.target.value)} />
+        </label>
+        <label className="block text-sm">
+          <span className="text-muted">Сумма пополнения, сум (0 = не требовать оплату)</span>
+          <Input className="mt-1" inputMode="numeric" value={payAmount} onChange={(e) => setPayAmount(e.target.value)} />
+        </label>
+        {reqs.data?.ok ? <p className="text-sm text-ok">Сохранено.</p> : null}
+        <Button disabled={reqs.isPending} onClick={() => reqs.mutate()}>
+          {reqs.isPending ? "Сохраняю…" : "Сохранить реквизиты"}
+        </Button>
       </section>
 
       <section className="glass-card space-y-4 rounded-xl p-5">
@@ -108,14 +171,13 @@ function SettingsPage() {
       <section className="glass-card space-y-4 rounded-xl p-5">
         <h2 className="font-medium">Бот логов</h2>
         <p className="text-sm text-muted">
-          Создайте отдельного бота в BotFather (например AllServisLogsBot). Подключите токен,
-          затем напишите ему <span className="font-mono text-accent">/start</span> в Telegram — туда пойдут заявки, назначения, блокировки.
+          Отдельный бот в BotFather. Подключите токен, затем напишите ему <span className="font-mono text-accent">/start</span>.
         </p>
         {logBot ? (
           <div className="rounded-lg bg-ok/10 px-4 py-3 text-sm">
             <p className="font-medium text-ok">@{logBot.bot_username}</p>
             <p className="mt-1 text-xs text-muted">
-              {logBot.log_chat_id ? "Чат логов привязан. События уходят в Telegram." : "Напишите боту /start, чтобы привязать чат."}
+              {logBot.log_chat_id ? "Чат логов привязан." : "Напишите боту /start, чтобы привязать чат."}
             </p>
             <Button className="mt-3" size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить лог-бота</Button>
           </div>

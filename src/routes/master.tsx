@@ -4,7 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AuthGuard } from "@/components/auth-guard";
 import { Button } from "@/components/ui/button";
 import { OrderBadge } from "@/components/admin/status-badge";
-import { heartbeatMaster, listMasters, listOrders, masterAdvance, masterDecision } from "@/lib/server/api";
+import { heartbeatMaster, listMasters, listOrders, masterAdvance, masterDecision, setMasterOnline } from "@/lib/server/api";
 import { serviceById } from "@/lib/catalog";
 import type { OrderStatus } from "@/lib/domain";
 
@@ -57,6 +57,10 @@ function MasterDesk() {
       masterAdvance({ data: { orderId: p.orderId, masterId: id!, to: p.to } }),
     onSuccess: () => qc.invalidateQueries(),
   });
+  const online = useMutation({
+    mutationFn: (on: boolean) => setMasterOnline({ data: { masterId: id!, online: on } }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["masters"] }),
+  });
 
   const next: Partial<Record<OrderStatus, OrderStatus>> = {
     master_accepted: "enroute",
@@ -91,6 +95,25 @@ function MasterDesk() {
       </header>
       <div className="mx-auto max-w-2xl space-y-6 p-4">
         <h1 className="font-display text-2xl">Кабинет мастера</h1>
+        {current ? (
+          <div className="flex flex-wrap items-center gap-2">
+            <p className="text-sm text-muted">
+              {current.first_name} {current.last_name} · {current.online_status === "online" || current.online_status === "busy" ? "на линии" : "офлайн"}
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!id || online.isPending}
+              onClick={() => online.mutate(!(current.online_status === "online" || current.online_status === "busy"))}
+            >
+              {current.online_status === "online" || current.online_status === "busy" ? "Уйти офлайн" : "Выйти на линию"}
+            </Button>
+          </div>
+        ) : (
+          <p className="rounded-xl bg-surface px-4 py-8 text-center text-sm text-subtle">
+            Мастеров пока нет. Откройте админку — демо-парк появится после первого входа владельца.
+          </p>
+        )}
         <section className="space-y-3">
           <h2 className="text-sm text-muted">Новые назначения от администратора</h2>
           {inbox.length === 0 ? (

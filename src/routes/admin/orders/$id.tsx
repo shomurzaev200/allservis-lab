@@ -68,7 +68,7 @@ function OrderPage() {
           <p className="mt-2">{o.client_name}</p>
           <p className="text-sm text-muted">{o.phone}</p>
           <p className="text-sm text-muted">Telegram: {o.client_tg ?? "—"}</p>
-          <p className="text-sm text-muted">Рейтинг клиента: {o.client_rating.toFixed(1)}</p>
+          <p className="text-sm text-muted">Рейтинг клиента: {(o.client_rating ?? 5).toFixed(1)}</p>
           <p className="text-sm text-muted">Заявок в истории: {data.clientOrders}</p>
         </section>
         <section className="glass-card rounded-xl p-4">

@@ -26,7 +26,7 @@ async function tg(token: string, method: string, body: Record<string, unknown>) 
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
   });
-  const json = (await res.json()) as { ok: boolean; description?: string; result?: Record<string, unknown> };
+  const json = (await res.json()) as { ok: boolean; description?: string; result?: Record<string, unknown> | unknown[] };
   return json;
 }
 
@@ -44,31 +44,93 @@ function secretFrom(token: string) {
   return `as${h.toString(16)}${token.slice(-6)}`.replace(/[^a-zA-Z0-9_-]/g, "x").slice(0, 64);
 }
 
-export async function connectTelegramBot(sql: Sql, userId: string, token: string, origin: string) {
-  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
-    return { ok: false as const, error: "Неверный формат токена. Скопируйте его из @BotFather." };
+function nSafe(v: unknown) {
+  const x = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(x) ? x : 0;
+}
+
+const pollers = new Map<string, { stop: () => void }>();
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+export function stopPoller(token: string) {
+  pollers.get(token)?.stop();
+  pollers.delete(token);
+}
+
+export function startPoller(token: string, webhookId: string, secret: string) {
+  if (pollers.has(token)) return;
+  let alive = true;
+  pollers.set(token, { stop: () => { alive = false; } });
+  void (async () => {
+    try { await tg(token, "deleteWebhook", { drop_pending_updates: false }); } catch { /* ignore */ }
+    let offset = 0;
+    while (alive) {
+      try {
+        const json = await tg(token, "getUpdates", {
+          offset,
+          timeout: 25,
+          allowed_updates: ["message", "callback_query"],
+        });
+        if (!json.ok || !Array.isArray(json.result)) {
+          await sleep(2500);
+          continue;
+        }
+        for (const upd of json.result as TgUpdate[]) {
+          offset = (upd.update_id ?? 0) + 1;
+          try {
+            await handleTelegramWebhook(webhookId, secret, upd);
+          } catch {
+            /* keep polling */
+          }
+        }
+      } catch {
+        await sleep(3000);
+      }
+    }
+  })();
+}
+
+export async function resumeBots(sql: Sql, userId: string) {
+  try {
+    const ws = await sql<{ bot_token: string | null; webhook_id: string | null; bot_secret: string | null; poll_mode: boolean }>`
+      select bot_token, webhook_id, bot_secret, poll_mode from as_workspace where user_id = ${userId}
+    `;
+    const w = ws[0];
+    if (w?.poll_mode && w.bot_token && w.webhook_id && w.bot_secret) {
+      startPoller(w.bot_token, w.webhook_id, w.bot_secret);
+    }
+    const extras = await sql<{ bot_token: string | null; webhook_id: string | null; bot_secret: string | null }>`
+      select bot_token, webhook_id, bot_secret from as_bots
+      where user_id = ${userId} and bot_token is not null and webhook_id is not null
+    `;
+    if (w?.poll_mode) {
+      for (const b of extras) {
+        if (b.bot_token && b.webhook_id && b.bot_secret) startPoller(b.bot_token, b.webhook_id, b.bot_secret);
+      }
+    }
+  } catch {
+    /* columns may not exist until migration */
   }
-  const me = await tg(token, "getMe", {});
-  if (!me.ok || !me.result) {
-    return { ok: false as const, error: me.description ?? "Telegram не принял токен. Проверьте, что бот создан в @BotFather." };
-  }
-  const username = String(me.result.username ?? "");
-  const webhookId = crypto.randomUUID();
-  const secret = secretFrom(token);
-  const hookUrl = `${origin}/api/telegram/${webhookId}`;
-  const set = await tg(token, "setWebhook", {
-    url: hookUrl,
-    secret_token: secret,
-    allowed_updates: ["message", "callback_query"],
-    drop_pending_updates: false,
-  });
-  if (!set.ok) {
-    return { ok: false as const, error: set.description ?? "Не удалось поставить webhook. Сайт должен быть опубликован с https." };
-  }
+}
+
+async function persistMainBot(
+  sql: Sql,
+  userId: string,
+  token: string,
+  username: string,
+  secret: string,
+  webhookId: string,
+  origin: string,
+  poll: boolean,
+) {
   await sql`
     update as_workspace
     set bot_token = ${token}, bot_username = ${username}, bot_secret = ${secret},
-        webhook_id = ${webhookId}, bot_connected_at = now()
+        webhook_id = ${webhookId}, bot_connected_at = now(),
+        public_origin = ${origin}, poll_mode = ${poll}
     where user_id = ${userId}
   `;
   const existing = await sql<{ id: number }>`
@@ -86,7 +148,44 @@ export async function connectTelegramBot(sql: Sql, userId: string, token: string
       values (${userId}, ${"client"}, ${"Основной"}, ${token}, ${username}, ${secret}, ${webhookId}, now())
     `;
   }
-  return { ok: true as const, error: null, username, webhookUrl: hookUrl };
+}
+
+export async function connectTelegramBot(sql: Sql, userId: string, token: string, origin: string) {
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
+    return { ok: false as const, error: "Неверный формат токена. Скопируйте его из @BotFather.", username: null as string | null, mode: null as string | null };
+  }
+  const me = await tg(token, "getMe", {});
+  if (!me.ok || !me.result || Array.isArray(me.result)) {
+    return { ok: false as const, error: me.description ?? "Telegram не принял токен. Проверьте, что бот создан в @BotFather.", username: null, mode: null };
+  }
+  const username = String((me.result as Record<string, unknown>).username ?? "");
+  const webhookId = crypto.randomUUID();
+  const secret = secretFrom(token);
+  const https = origin.startsWith("https://");
+  if (https) {
+    const hookUrl = `${origin}/api/telegram/${webhookId}`;
+    const set = await tg(token, "setWebhook", {
+      url: hookUrl,
+      secret_token: secret,
+      allowed_updates: ["message", "callback_query"],
+      drop_pending_updates: false,
+    });
+    if (!set.ok) {
+      return { ok: false as const, error: set.description ?? "Не удалось поставить webhook. Нужен https-домен.", username: null, mode: null };
+    }
+    stopPoller(token);
+    await persistMainBot(sql, userId, token, username, secret, webhookId, origin, false);
+    return { ok: true as const, error: null, username, webhookUrl: hookUrl, mode: "webhook" };
+  }
+  await persistMainBot(sql, userId, token, username, secret, webhookId, origin, true);
+  startPoller(token, webhookId, secret);
+  return {
+    ok: true as const,
+    error: null,
+    username,
+    webhookUrl: null as string | null,
+    mode: "polling",
+  };
 }
 
 export async function connectExtraBot(
@@ -98,24 +197,31 @@ export async function connectExtraBot(
   label: string,
 ) {
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(token)) {
-    return { ok: false as const, error: "Неверный формат токена. Скопируйте его из @BotFather." };
+    return { ok: false as const, error: "Неверный формат токена. Скопируйте его из @BotFather.", username: null as string | null, mode: null as string | null };
   }
   const me = await tg(token, "getMe", {});
-  if (!me.ok || !me.result) {
-    return { ok: false as const, error: me.description ?? "Telegram не принял токен." };
+  if (!me.ok || !me.result || Array.isArray(me.result)) {
+    return { ok: false as const, error: me.description ?? "Telegram не принял токен.", username: null, mode: null };
   }
-  const username = String(me.result.username ?? "");
+  const username = String((me.result as Record<string, unknown>).username ?? "");
   const webhookId = crypto.randomUUID();
   const secret = secretFrom(token);
-  const hookUrl = `${origin}/api/telegram/${webhookId}`;
-  const set = await tg(token, "setWebhook", {
-    url: hookUrl,
-    secret_token: secret,
-    allowed_updates: ["message", "callback_query"],
-    drop_pending_updates: false,
-  });
-  if (!set.ok) {
-    return { ok: false as const, error: set.description ?? "Не удалось поставить webhook. Нужен https." };
+  const https = origin.startsWith("https://");
+  if (https) {
+    const hookUrl = `${origin}/api/telegram/${webhookId}`;
+    const set = await tg(token, "setWebhook", {
+      url: hookUrl,
+      secret_token: secret,
+      allowed_updates: ["message", "callback_query"],
+      drop_pending_updates: false,
+    });
+    if (!set.ok) {
+      return { ok: false as const, error: set.description ?? "Не удалось поставить webhook. Нужен https.", username: null, mode: null };
+    }
+    stopPoller(token);
+  } else {
+    startPoller(token, webhookId, secret);
+    await sql`update as_workspace set poll_mode = ${true} where user_id = ${userId}`;
   }
   if (kind === "logs") {
     const prev = await sql<{ id: number; bot_token: string | null }>`
@@ -123,6 +229,7 @@ export async function connectExtraBot(
     `;
     if (prev[0]?.bot_token && prev[0].bot_token !== token) {
       try { await tg(prev[0].bot_token, "deleteWebhook", {}); } catch { /* ignore */ }
+      stopPoller(prev[0].bot_token);
     }
     if (prev[0]) {
       await sql`
@@ -142,7 +249,7 @@ export async function connectExtraBot(
       values (${userId}, ${"client"}, ${label || "Клиентский бот"}, ${token}, ${username}, ${secret}, ${webhookId}, now())
     `;
   }
-  return { ok: true as const, error: null, username, webhookUrl: hookUrl };
+  return { ok: true as const, error: null, username, webhookUrl: https ? `${origin}/api/telegram/${webhookId}` : null, mode: https ? "webhook" : "polling" };
 }
 
 export async function disconnectBotById(sql: Sql, userId: string, botId: number) {
@@ -152,6 +259,7 @@ export async function disconnectBotById(sql: Sql, userId: string, botId: number)
   if (!row[0]) return;
   if (row[0].bot_token) {
     try { await tg(row[0].bot_token, "deleteWebhook", {}); } catch { /* ignore */ }
+    stopPoller(row[0].bot_token);
   }
   await sql`delete from as_bots where user_id = ${userId} and id = ${botId}`;
   if (row[0].kind === "client") {
@@ -159,16 +267,11 @@ export async function disconnectBotById(sql: Sql, userId: string, botId: number)
     if (!nSafe(rest[0]?.n)) {
       await sql`
         update as_workspace
-        set bot_token = null, bot_username = null, bot_secret = null, webhook_id = null, bot_connected_at = null
+        set bot_token = null, bot_username = null, bot_secret = null, webhook_id = null, bot_connected_at = null, poll_mode = ${false}
         where user_id = ${userId}
       `;
     }
   }
-}
-
-function nSafe(v: unknown) {
-  const x = typeof v === "number" ? v : Number(v);
-  return Number.isFinite(x) ? x : 0;
 }
 
 export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
@@ -191,10 +294,11 @@ export async function disconnectTelegramBot(sql: Sql, userId: string) {
   const token = row[0]?.bot_token;
   if (token) {
     try { await tg(token, "deleteWebhook", { drop_pending_updates: false }); } catch { /* ignore */ }
+    stopPoller(token);
   }
   await sql`
     update as_workspace
-    set bot_token = null, bot_username = null, bot_secret = null, webhook_id = null, bot_connected_at = null
+    set bot_token = null, bot_username = null, bot_secret = null, webhook_id = null, bot_connected_at = null, poll_mode = ${false}
     where user_id = ${userId}
   `;
   const extras = await sql<{ id: number; bot_token: string | null }>`
@@ -203,6 +307,125 @@ export async function disconnectTelegramBot(sql: Sql, userId: string) {
   for (const b of extras) {
     await sql`delete from as_bots where id = ${b.id}`;
   }
+}
+
+function payText(card: string, bank: string, holder: string, amount: number) {
+  const lines = [
+    "Чтобы пользоваться ботом, оплатите доступ и пришлите скрин перевода.",
+    "",
+    bank ? `Банк: ${bank}` : null,
+    card ? `Карта: ${card}` : null,
+    holder ? `Получатель: ${holder}` : null,
+    amount > 0 ? `Сумма: ${amount.toLocaleString("ru-RU")} сум` : null,
+    "",
+    "После перевода отправьте сюда скриншот чека. Администратор подтвердит — и бот откроется.",
+  ];
+  return lines.filter(Boolean).join("\n");
+}
+
+async function gated(
+  sql: Sql,
+  uid: string,
+  token: string,
+  chatId: string,
+  from: TgUser,
+  msg: TgMessage | undefined,
+  cb: TgUpdate["callback_query"],
+): Promise<boolean> {
+  const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Клиент Telegram";
+  let settings: { channel_username: string | null; pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number } | undefined;
+  try {
+    settings = (await sql<{
+      channel_username: string | null; pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number;
+    }>`
+      select channel_username, pay_card, pay_bank, pay_holder, pay_amount from as_workspace where user_id = ${uid}
+    `)[0];
+  } catch {
+    return false;
+  }
+  const channel = (settings?.channel_username ?? "").replace(/^@/, "").trim();
+  if (channel) {
+    const member = await tg(token, "getChatMember", { chat_id: `@${channel}`, user_id: from.id });
+    const st = member.ok && member.result && !Array.isArray(member.result)
+      ? String((member.result as Record<string, unknown>).status ?? "")
+      : "";
+    const ok = st === "member" || st === "administrator" || st === "creator";
+    if (!ok) {
+      if (cb?.id) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id, text: "Подписка не найдена" });
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: `Сначала подпишитесь на канал @${channel}, затем нажмите «Я подписался».`,
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: `Открыть @${channel}`, url: `https://t.me/${channel}` }],
+            [{ text: "Я подписался", callback_data: "sub:ok" }],
+          ],
+        },
+      });
+      return true;
+    }
+  }
+
+  const amount = nSafe(settings?.pay_amount);
+  if (amount <= 0 && !(settings?.pay_card ?? "").trim()) return false;
+
+  let client = await sql<{ id: number; paid: boolean; blocked: boolean }>`
+    select id, paid, blocked from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  if (!client[0]) {
+    await sql`
+      insert into as_clients (user_id, telegram_id, name, phone, city, district, rating)
+      values (${uid}, ${chatId}, ${name}, ${""}, ${"Ташкент"}, ${""}, ${5})
+    `;
+    client = await sql<{ id: number; paid: boolean; blocked: boolean }>`
+      select id, paid, blocked from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+    `;
+  }
+  if (client[0]?.blocked) {
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Профиль заблокирован администратором." });
+    return true;
+  }
+  if (client[0]?.paid) return false;
+
+  const pending = await sql<{ id: number; status: string }>`
+    select id, status from as_payments where user_id = ${uid} and telegram_id = ${chatId} order by id desc limit 1
+  `;
+  if (pending[0]?.status === "approved") {
+    await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and telegram_id = ${chatId}`;
+    return false;
+  }
+  if (msg?.photo?.length) {
+    const fileId = msg.photo[msg.photo.length - 1]!.file_id;
+    const dataUrl = await downloadPhoto(token, fileId);
+    if (pending[0]?.status === "pending") {
+      await sql`update as_payments set screenshot = ${dataUrl ?? fileId} where id = ${pending[0].id}`;
+    } else {
+      await sql`
+        insert into as_payments (user_id, client_id, telegram_id, client_name, amount, screenshot, status)
+        values (${uid}, ${client[0]?.id ?? null}, ${chatId}, ${name}, ${amount}, ${dataUrl ?? fileId}, ${"pending"})
+      `;
+    }
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Скрин получил. Администратор проверит оплату. Как подтвердит — бот откроется.",
+    });
+    try {
+      await pushWorkspaceLog(sql, uid, `💳 Скрин оплаты от ${name} (${chatId}). Сумма ${amount.toLocaleString("ru-RU")} сум.`);
+    } catch { /* ignore */ }
+    return true;
+  }
+  if (pending[0]?.status === "pending") {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Ваш скрин уже на проверке. Подождите подтверждения администратора.",
+    });
+    return true;
+  }
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text: payText(settings?.pay_card ?? "", settings?.pay_bank ?? "", settings?.pay_holder ?? "", amount),
+  });
+  return true;
 }
 
 export async function handleTelegramWebhook(hookId: string, secretHeader: string | null, update: TgUpdate) {
@@ -236,13 +459,15 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       await sql`update as_bots set log_chat_id = ${chatId} where id = ${extra[0]!.id}`;
       await tg(token, "sendMessage", {
         chat_id: Number(chatId),
-        text: "Лог-бот All Servis подключён. Сюда будут приходить заявки, назначения, блокировки и действия администраторов.",
+        text: "Лог-бот All Servis подключён. Сюда будут приходить заявки, назначения, блокировки и оплаты.",
       });
     }
     return { ok: true };
   }
 
   const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Клиент Telegram";
+
+  if (await gated(sql, uid, token, chatId, from, msg, cb)) return { ok: true };
 
   const sess = await sql<{ step: string; draft: string; live_order_id: number | null; last_status: string | null }>`
     select step, draft, live_order_id, last_status from as_tg_sessions where user_id = ${uid} and chat_id = ${chatId}
@@ -272,6 +497,25 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   step = result.step;
   draft = result.draft;
 
+  if (result.cancelLive && sess[0]?.live_order_id) {
+    const oid = sess[0].live_order_id;
+    await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now() where user_id = ${uid} and id = ${oid} and status not in ('completed','cancelled')`;
+    await sql`
+      insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+      values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify(emptyDraft())}, ${null}, ${"cancelled"}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify(emptyDraft())}, live_order_id = ${null}, last_status = ${"cancelled"}, tg_name = ${name}, updated_at = now()
+    `;
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: "Заявка отменена. /start — новая.",
+    });
+    try {
+      const { addEvent } = await import("./workspace");
+      await addEvent(sql, uid, oid, "cancelled", "client", {});
+    } catch { /* ignore */ }
+    return { ok: true };
+  }
+
   if (result.submit) {
     const dist = result.submit.districtId ? districtById(result.submit.districtId) : undefined;
     const svc = result.submit.serviceId ? serviceById(result.submit.serviceId) : undefined;
@@ -297,7 +541,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
         const reply = statusReply("waiting_admin");
         await tg(token, "sendMessage", {
           chat_id: Number(chatId),
-          text: `${reply.text}\n\nЗаявка №${created.publicNo}\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум`,
+          text: `${reply.text}\n\nЗаявка №${created.publicNo}\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум\n\nОтмена: /cancel`,
           reply_markup: markup(reply.buttons),
         });
       } catch (err) {
@@ -329,7 +573,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 async function downloadPhoto(token: string, fileId: string): Promise<string | null> {
   try {
     const info = await tg(token, "getFile", { file_id: fileId });
-    const path = info.result && typeof info.result.file_path === "string" ? info.result.file_path : null;
+    const path = info.result && !Array.isArray(info.result) && typeof info.result.file_path === "string" ? info.result.file_path : null;
     if (!path) return null;
     const res = await fetch(`https://api.telegram.org/file/bot${token}/${path}`);
     const buf = Buffer.from(await res.arrayBuffer());
@@ -347,6 +591,8 @@ export async function pushOrderStatus(sql: Sql, userId: string, orderId: number,
   const sess = await sql<{ chat_id: string }>`
     select chat_id from as_tg_sessions where user_id = ${userId} and live_order_id = ${orderId}
   `;
+  const msg = statusReply(status, masterName);
+  const extra = status === "waiting_admin" || status === "assigned" ? "\nОтмена: /cancel" : "";
   if (!sess[0]) {
     const cl = await sql<{ telegram_id: string | null }>`
       select c.telegram_id from as_orders o join as_clients c on c.id = o.client_id
@@ -354,15 +600,13 @@ export async function pushOrderStatus(sql: Sql, userId: string, orderId: number,
     `;
     const tgId = cl[0]?.telegram_id;
     if (!tgId || !/^\d+$/.test(tgId)) return;
-    const msg = statusReply(status, masterName);
-    await tg(token, "sendMessage", { chat_id: Number(tgId), text: msg.text, reply_markup: markup(msg.buttons) });
+    await tg(token, "sendMessage", { chat_id: Number(tgId), text: msg.text + extra, reply_markup: markup(msg.buttons) });
     return;
   }
   await sql`update as_tg_sessions set last_status = ${status}, updated_at = now() where user_id = ${userId} and live_order_id = ${orderId}`;
-  const msg = statusReply(status, masterName);
   await tg(token, "sendMessage", {
     chat_id: Number(sess[0].chat_id),
-    text: `${msg.text}${masterName ? "" : ""}`,
+    text: msg.text + extra,
     reply_markup: markup(msg.buttons),
   });
 }

@@ -65,7 +65,8 @@ export function welcomeMessages(): ChatMessage[] {
 export type BotEvent =
   | { type: "text"; text: string }
   | { type: "tap"; id: string; label: string }
-  | { type: "photo"; dataUrl: string };
+  | { type: "photo"; dataUrl: string }
+  | { type: "location"; lat: number; lng: number };
 
 export type BotResult = {
   userMessage?: ChatMessage;
@@ -73,6 +74,7 @@ export type BotResult = {
   step: ChatStep;
   draft: Draft;
   submit?: Draft;
+  cancelLive?: boolean;
 };
 
 function summary(d: Draft): string {
@@ -117,7 +119,31 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     };
   }
 
-  const raw = event.type === "text" ? event.text.trim() : event.label;
+  if (event.type === "location") {
+    let distId = draft.districtId;
+    if (!distId) {
+      let best = DISTRICTS[0]!;
+      let bestD = Infinity;
+      for (const d of DISTRICTS) {
+        const dx = d.lat - event.lat;
+        const dy = d.lng - event.lng;
+        const dist = dx * dx + dy * dy;
+        if (dist < bestD) {
+          bestD = dist;
+          best = d;
+        }
+      }
+      distId = best.id;
+    }
+    return {
+      userMessage: user("Геолокация получена"),
+      replies: [bot("Точка на карте записана. Оставьте номер телефона.")],
+      step: "phone",
+      draft: { ...draft, lat: event.lat, lng: event.lng, districtId: distId },
+    };
+  }
+
+  const raw = event.type === "text" ? event.text.trim() : event.type === "tap" ? event.label : "";
   const tapId = event.type === "tap" ? event.id : "";
   const lower = raw.toLowerCase();
 
@@ -142,6 +168,15 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     };
   }
   if (lower === "/cancel" || tapId === "cmd:cancel") {
+    if (step === "live") {
+      return {
+        userMessage: user("Отменить заявку"),
+        replies: [bot("Заявка будет отменена администратором. Напишите /start для новой.")],
+        step: "live",
+        draft,
+        cancelLive: true,
+      };
+    }
     return {
       userMessage: user("Отменить"),
       replies: [bot("Черновик сброшен. Выберите услугу.", { buttons: CATEGORY_KEYS })],

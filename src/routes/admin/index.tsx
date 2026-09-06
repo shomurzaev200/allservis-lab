@@ -10,10 +10,19 @@ import { serviceById } from "@/lib/catalog";
 export const Route = createFileRoute("/admin/")({ component: Dashboard });
 
 function Dashboard() {
-  const { data, isPending } = useQuery({
+  const { data, isPending, isError, refetch } = useQuery({
     queryKey: ["dashboard"],
     queryFn: () => getDashboard(),
   });
+
+  if (isError) {
+    return (
+      <div className="p-6">
+        <p className="text-sm text-danger">Дашборд не загрузился. Нажмите обновить — если только что обновили сервер, миграции применятся при рестарте.</p>
+        <button type="button" className="mt-3 text-sm text-accent" onClick={() => void refetch()}>Обновить</button>
+      </div>
+    );
+  }
 
   if (isPending || !data) {
     return (
@@ -53,7 +62,7 @@ function Dashboard() {
 
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Мастеров онлайн" value={data.masters.online} hint={`свободны ${data.masters.free} · всего ${data.masters.total}`} tone="ok" />
-        <Kpi label="Клиентов" value={data.clients.active} hint={`сегодня +${data.clients.today} · повторные ${data.clients.returning}`} />
+        <Kpi label="Клиентов" value={data.clients.active} hint={`сегодня +${data.clients.today ?? 0} · повторные ${data.clients.returning ?? 0}`} />
         <Kpi label="Заказов сегодня" value={data.orders.today} hint={`неделя ${data.orders.week} · всего ${data.orders.total}`} tone="accent" />
         <Kpi label="Выручка сегодня" value={formatSum(Number(data.finance.today))} hint={`средний чек ${formatSum(Number(data.finance.avg))}`} />
       </div>
@@ -67,7 +76,7 @@ function Dashboard() {
         <Kpi label="Назначены" value={data.orders.assigned} tone="accent" />
         <Kpi label="В работе" value={data.orders.work} tone="ok" />
         <Kpi label="Завершено" value={data.orders.done} />
-        <Kpi label="Отказы / отмены" value={`${data.orders.rejected} / ${data.orders.cancelled}`} tone="danger" />
+        <Kpi label="Отказы / отмены" value={`${data.orders.rejected ?? 0} / ${data.orders.cancelled ?? 0}`} tone="danger" />
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">

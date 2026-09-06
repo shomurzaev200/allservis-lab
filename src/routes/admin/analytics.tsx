@@ -25,26 +25,29 @@ export const Route = createFileRoute("/admin/analytics")({ component: AnalyticsP
 const PIE = ["#22d3ee", "#34d399", "#f5c15c", "#f43f5e", "#8ba0b5"];
 
 function AnalyticsPage() {
-  const { data, isPending } = useQuery({
+  const { data, isPending, isError } = useQuery({
     queryKey: ["analytics"],
     queryFn: () => getAnalytics(),
   });
-  if (isPending || !data) return <p className="p-6 text-sm text-muted">Считаем метрики…</p>;
-  const byCat = data.byCat.map((r) => ({
+  if (isPending) return <p className="p-6 text-sm text-muted">Считаем метрики…</p>;
+  if (isError || !data) return <p className="p-6 text-sm text-danger">Не удалось загрузить аналитику. Обновите страницу.</p>;
+  const ratingsSrc = data.ratings ?? [];
+  const hourSrc = data.byHour ?? [];
+  const byCat = (data.byCat ?? []).map((r) => ({
     name: serviceById(r.slug)?.title ?? r.slug,
     n: Number(r.n),
   }));
-  const byDay = data.byDay.map((r) => ({ d: String(r.d).slice(5), n: Number(r.n), revenue: Number(r.revenue) }));
-  const byCity = data.byCity.map((r) => ({ name: r.district || "—", n: Number(r.n) }));
+  const byDay = (data.byDay ?? []).map((r) => ({ d: String(r.d).slice(5), n: Number(r.n), revenue: Number(r.revenue) }));
+  const byCity = (data.byCity ?? []).map((r) => ({ name: r.district || "—", n: Number(r.n) }));
   const ratings = [1, 2, 3, 4, 5].map((rating) => ({
     name: `${rating}`,
-    n: Number(data.ratings.find((r) => Number(r.rating) === rating)?.n ?? 0),
+    n: Number(ratingsSrc.find((r) => Number(r.rating) === rating)?.n ?? 0),
   }));
   const byHour = Array.from({ length: 24 }, (_, h) => ({
     h: String(h).padStart(2, "0"),
-    n: Number(data.byHour.find((r) => Number(r.h) === h)?.n ?? 0),
+    n: Number(hourSrc.find((r) => Number(r.h) === h)?.n ?? 0),
   }));
-  const f = data.funnel;
+  const f = data.funnel ?? { created: 0, assigned: 0, accepted: 0, completed: 0, cancelled: 0 };
   const conv = f.created ? Math.round((f.completed / f.created) * 100) : 0;
   return (
     <div className="space-y-6 p-4 md:p-6">

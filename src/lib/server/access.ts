@@ -1,5 +1,6 @@
 import { getSql } from "@/lib/db";
 import { ensureWorkspace, tickPresence, type Sql } from "./workspace";
+import { resumeBots } from "./telegram";
 
 export type StaffRole = "owner" | "admin";
 
@@ -82,6 +83,7 @@ export async function actorCtx(userId: string) {
   const sql = await getSql();
   const actor = await resolveActor(sql, userId);
   await tickPresence(sql, actor.workspaceId);
+  void resumeBots(sql, actor.workspaceId);
   return { sql, uid: actor.workspaceId, actor };
 }
 

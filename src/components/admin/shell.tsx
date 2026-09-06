@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Bell, ClipboardList, LayoutDashboard, Map, Menu, MessageCircle, ScrollText, Settings, Star, Users, Wallet, Wrench, X } from "lucide-react";
+import { Bell, ClipboardList, CreditCard, LayoutDashboard, Map, Menu, MessageCircle, ScrollText, Settings, Star, Users, Wallet, Wrench, X } from "lucide-react";
 import { UserButton } from "@/lib/auth/gates";
 import { cn } from "@/lib/utils";
 
@@ -12,6 +12,7 @@ const NAV = [
   { to: "/admin/map", label: "Карта", icon: Map },
   { to: "/admin/analytics", label: "Аналитика", icon: LayoutDashboard },
   { to: "/admin/finance", label: "Финансы", icon: Wallet },
+  { to: "/admin/payments", label: "Пополнения", icon: CreditCard },
   { to: "/admin/reviews", label: "Отзывы", icon: Star },
   { to: "/admin/notifications", label: "Уведомления", icon: Bell },
   { to: "/admin/audit", label: "Audit Log", icon: ScrollText },
