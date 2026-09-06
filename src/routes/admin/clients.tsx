@@ -32,7 +32,7 @@ function ClientsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["clients"] }),
   });
   const filtered = data.filter((c) =>
-    `${c.name} ${c.phone} ${c.district} ${c.lang} ${c.role}`.toLowerCase().includes(q.toLowerCase()),
+    `${c.name} ${c.phone} ${c.district} ${c.lang} ${c.role} ${c.last_master ?? ""} ${c.ref_code ?? ""}`.toLowerCase().includes(q.toLowerCase()),
   );
   return (
     <div className="space-y-4 p-4 md:p-6">
@@ -58,13 +58,15 @@ function ClientsPage() {
               <th className="px-3 py-3">Язык</th>
               <th className="px-3 py-3">Роль</th>
               <th className="px-3 py-3">Заказы</th>
+              <th className="px-3 py-3">Последний мастер</th>
+              <th className="px-3 py-3">Реферал</th>
               <th className="px-3 py-3">Оплата</th>
               <th className="px-3 py-3">Статус</th>
               {canDelete || canPay ? <th className="px-3 py-3" /> : null}
             </tr>
           </thead>
           <tbody>
-            {isPending ? <tr><td className="px-3 py-6 text-muted" colSpan={9}>Загрузка…</td></tr> : null}
+            {isPending ? <tr><td className="px-3 py-6 text-muted" colSpan={12}>Загрузка…</td></tr> : null}
             {filtered.map((c) => (
               <tr key={c.id} className="border-t border-border">
                 <td className="px-3 py-3">{c.name}</td>
@@ -78,7 +80,9 @@ function ClientsPage() {
                 </td>
                 <td className="px-3 py-3 uppercase">{c.lang || "ru"}</td>
                 <td className="px-3 py-3">{c.role === "master" ? "мастер" : "клиент"}</td>
-                <td className="px-3 py-3">{c.orders_count}</td>
+                <td className="px-3 py-3">{c.orders_count}{c.completed_count ? ` · ✓${c.completed_count}` : ""}</td>
+                <td className="px-3 py-3 text-xs">{c.last_master || "—"}</td>
+                <td className="px-3 py-3 font-mono text-[11px]">{c.ref_code || "—"}{c.referred_by ? ` ← ${c.referred_by}` : ""}</td>
                 <td className="px-3 py-3">{c.paid ? <span className="text-ok">оплачен</span> : <span className="text-warn">нет</span>}</td>
                 <td className="px-3 py-3">{c.blocked ? <span className="text-danger">блок</span> : <span className="text-ok">ок</span>}</td>
                 {canDelete || canPay ? (

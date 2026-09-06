@@ -1,7 +1,7 @@
 import { getSql } from "@/lib/db";
 import { DISTRICTS, districtById, serviceById } from "@/lib/catalog";
 import { clientLabel, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
-import { emptyDraft, reduceBot, statusReply, clientMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
+import { emptyDraft, reduceBot, statusReply, clientMenu, liveMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
@@ -1341,23 +1341,29 @@ async function gated(
   return true;
 }
 
-async function ensureRefCode(sql: Sql, uid: string, chatId: string) {
+async function ensureRefCode(sql: Sql, uid: string, chatId: string): Promise<string> {
   try {
     const row = await sql<{ id: number; ref_code: string | null }>`
       select id, ref_code from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
     `;
-    if (row[0] && !row[0].ref_code) {
-      const code = `r${chatId.slice(-4)}${Math.random().toString(36).slice(2, 5)}`;
+    if (!row[0]) return "";
+    if (row[0].ref_code) return row[0].ref_code;
+    for (let i = 0; i < 6; i++) {
+      const code = `r_${Math.random().toString(36).slice(2, 8)}`;
+      const clash = await sql<{ id: number }>`select id from as_clients where user_id = ${uid} and ref_code = ${code} limit 1`;
+      if (clash[0]) continue;
       await sql`update as_clients set ref_code = ${code} where id = ${row[0].id} and ref_code is null`;
+      return code;
     }
   } catch { /* col may miss */ }
+  return "";
 }
 
 async function applyStartPayload(sql: Sql, uid: string, chatId: string, payload: string) {
   const p = payload.trim();
   if (!p) return;
   try {
-    if (p.startsWith("r") && p.length >= 5) {
+    if (p.startsWith("r")) {
       const inv = await sql<{ telegram_id: string | null }>`
         select telegram_id from as_clients where user_id = ${uid} and ref_code = ${p} limit 1
       `;
@@ -1432,6 +1438,103 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
       `;
     } catch { /* ignore */ }
   }
+}
+
+function kbClient(lang: string | undefined, live: boolean) {
+  return live ? liveMenu(lang === "uz" ? "uz" : "ru") : clientMenu(lang === "uz" ? "uz" : "ru");
+}
+
+async function pushSupportAlert(sql: Sql, uid: string, name: string, chatId: string, text: string) {
+  try {
+    await pushWorkspaceLog(
+      sql,
+      uid,
+      [
+        "<b>💬 Сообщение клиента</b>",
+        `👤 <b>${escHtml(name)}</b>`,
+        `📱 Telegram: <code>${escHtml(chatId)}</code>`,
+        text ? `💬 ${escHtml(text)}` : "Просит оператора",
+      ].filter(Boolean).join("\n"),
+      { parseMode: "HTML" },
+    );
+  } catch { /* ignore */ }
+}
+
+async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
+  const mine = await sql<{ public_no: number; status: string; district: string; master_name: string | null }>`
+    select o.public_no, o.status, o.district,
+      nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') as master_name
+    from as_orders o
+    join as_clients c on c.id = o.client_id
+    left join as_masters m on m.id = o.master_id
+    where o.user_id = ${uid} and c.telegram_id = ${chatId}
+    order by o.created_at desc limit 8
+  `;
+  const lines = mine.length
+    ? mine.map((x) => {
+        const st = STATUS_LABEL[x.status as OrderStatus] ?? x.status;
+        const who = x.master_name ? ` · ${x.master_name}` : "";
+        return `№${x.public_no} · ${st}\n${x.district || "—"}${who}`;
+      }).join("\n\n")
+    : (lang === "uz" ? "Ariza yo‘q." : "Заявок пока нет.");
+  const head = lang === "uz" ? "📋 Arizalarim" : "📋 Мои заявки";
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text: `${head}\n\n${lines}`, reply_markup: markup(kbClient(lang, live)) });
+}
+
+async function sendClientRef(sql: Sql, uid: string, token: string, chatId: string, name: string, lang: string, live: boolean) {
+  await persistProfile(sql, uid, chatId, name, emptyDraft());
+  const code = await ensureRefCode(sql, uid, chatId);
+  const botRow = await sql<{ bot_username: string | null }>`select bot_username from as_workspace where user_id = ${uid}`;
+  const uname = (botRow[0]?.bot_username ?? "").replace(/^@/, "");
+  const link = uname && code ? `https://t.me/${uname}?start=${code}` : (code ? `Код: ${code}` : "");
+  const invited = code
+    ? await sql<{ n: number }>`select count(*)::int as n from as_clients where user_id = ${uid} and referred_by = ${code}`
+    : [{ n: 0 }];
+  const text = lang === "uz"
+    ? `Sizning shaxsiy havolangiz (faqat sizniki):\n${link || "Avval /start"}\n\nTaklif qilingan: ${invited[0]?.n ?? 0}`
+    : `Ваша уникальная ссылка (только для этого аккаунта):\n${link || "Напишите /start ещё раз"}\n\nПриглашено друзей: ${invited[0]?.n ?? 0}\nДруг открывает ссылку — вы в статистике «Рефералы».`;
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(kbClient(lang, live)) });
+}
+
+async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
+  const c = await sql<{
+    name: string; phone: string; district: string; lat: number | null; lng: number | null;
+    orders_count: number; completed_count: number; last_master: string | null; last_no: number | null; last_status: string | null;
+  }>`
+    select cl.name, cl.phone, cl.district, cl.lat, cl.lng,
+      (select count(*)::int from as_orders o where o.client_id = cl.id) as orders_count,
+      (select count(*)::int from as_orders o where o.client_id = cl.id and o.status = 'completed') as completed_count,
+      (select nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') from as_orders o
+        left join as_masters m on m.id = o.master_id
+        where o.client_id = cl.id and o.master_id is not null
+        order by coalesce(o.completed_at, o.updated_at) desc limit 1) as last_master,
+      (select o.public_no from as_orders o where o.client_id = cl.id order by o.created_at desc limit 1) as last_no,
+      (select o.status from as_orders o where o.client_id = cl.id order by o.created_at desc limit 1) as last_status
+    from as_clients cl
+    where cl.user_id = ${uid} and cl.telegram_id = ${chatId}
+    limit 1
+  `;
+  const row = c[0];
+  const geo = row?.lat != null && row?.lng != null ? `${Number(row.lat).toFixed(5)}, ${Number(row.lng).toFixed(5)}` : "—";
+  const lastSt = row?.last_status ? (STATUS_LABEL[row.last_status as OrderStatus] ?? row.last_status) : "—";
+  const text = [
+    lang === "uz" ? "👤 Profil" : "👤 Профиль",
+    "",
+    `${lang === "uz" ? "Ism" : "Имя"}: ${row?.name || "—"}`,
+    `${lang === "uz" ? "Tel" : "Телефон"}: ${row?.phone || "—"}`,
+    `${lang === "uz" ? "Tuman" : "Район"}: ${row?.district || "—"}`,
+    `${lang === "uz" ? "Oxirgi geo" : "Последняя геолокация"}: ${geo}`,
+    `${lang === "uz" ? "Arizalar" : "Заявок"}: ${row?.orders_count ?? 0} (${lang === "uz" ? "tugagan" : "завершено"} ${row?.completed_count ?? 0})`,
+    row?.last_no ? `${lang === "uz" ? "Oxirgi ariza" : "Последняя заявка"}: №${row.last_no} · ${lastSt}` : "",
+    `${lang === "uz" ? "Oxirgi usta" : "Последний мастер"}: ${row?.last_master || "—"}`,
+    "",
+    lang === "uz" ? "Til: tugma Русский / O‘zbekcha. Usta: «Мастер»." : "Язык — кнопки ниже. Стать мастером: напишите «Мастер».",
+  ].filter(Boolean).join("\n");
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text,
+    reply_markup: markup(kbClient(lang, live)),
+  });
 }
 
 async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: string, draft: Draft) {
@@ -1583,7 +1686,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const masterExists = await sql<{ id: number }>`
     select id from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
   `;
-  if (masterExists[0] && (tapGuess === "cmd:jobs" || tapGuess === "cmd:active" || tapGuess === "cmd:profile" || tapGuess === "cmd:stats" || tapGuess === "cmd:help" || tapGuess === "cmd:loc" || tapGuess === "online:on" || tapGuess === "online:off")) {
+  if (masterExists[0] && (tapGuess === "cmd:jobs" || tapGuess === "cmd:active" || tapGuess === "cmd:stats" || tapGuess === "cmd:loc" || tapGuess === "online:on" || tapGuess === "online:off")) {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     await handleMasterMenu(sql, uid, token, chatId, tapGuess);
     return { ok: true };
@@ -1596,78 +1699,63 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     if (handled) return { ok: true };
   }
 
-  if (tapGuess === "cmd:myorders") {
-    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    const mine = await sql<{ public_no: number; status: string; district: string }>`
-      select o.public_no, o.status, o.district from as_orders o
-      join as_clients c on c.id = o.client_id
-      where o.user_id = ${uid} and c.telegram_id = ${chatId}
-      order by o.created_at desc limit 8
-    `;
-    const lines = mine.length
-      ? mine.map((x) => `№${x.public_no} · ${x.district} · ${x.status}`).join("\n")
-      : "Заявок пока нет.";
-    await tg(token, "sendMessage", { chat_id: Number(chatId), text: lines, reply_markup: markup(clientMenu("ru")) });
-    return { ok: true };
-  }
-
-  if (tapGuess === "cmd:ref") {
-    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    const have = await sql<{ id: number }>`select id from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1`;
-    if (!have[0]) await persistProfile(sql, uid, chatId, name, emptyDraft());
-    await ensureRefCode(sql, uid, chatId);
-    const me = await sql<{ ref_code: string | null }>`select ref_code from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1`;
-    const botRow = await sql<{ bot_username: string | null }>`select bot_username from as_workspace where user_id = ${uid}`;
-    const code = me[0]?.ref_code ?? "";
-    const uname = botRow[0]?.bot_username ?? "";
-    const link = uname && code ? `https://t.me/${uname}?start=${code}` : code || "Сначала /start";
-    const invited = await sql<{ n: number }>`select count(*)::int as n from as_clients where user_id = ${uid} and referred_by = ${code}`;
-    const kb = masterExists[0] ? masterMenu("ru", true) : clientMenu("ru");
-    await tg(token, "sendMessage", {
-      chat_id: Number(chatId),
-      text: `Ваша уникальная ссылка:\n${link}\n\nПриглашено: ${invited[0]?.n ?? 0}\nДруг открывает ссылку — вы в статистике админки (Рефералы).`,
-      reply_markup: markup(kb),
-    });
-    return { ok: true };
-  }
-
-  if (tapGuess === "cmd:help") {
-    await tg(token, "sendMessage", {
-      chat_id: Number(chatId),
-      text: "All Servis:\n• Кнопки услуг — вызов мастера\n• 📋 Мои заявки — статус\n• 👥 Друзья — ваша ссылка\n• 📞 Оператор — диспетчер увидит сообщение\n• /start — меню  /lang — язык  /cancel — отмена",
-      reply_markup: markup(clientMenu("ru")),
-    });
-    return { ok: true };
-  }
-
-  if (tapGuess === "cmd:support") {
-    try {
-      await pushWorkspaceLog(
-        sql,
-        uid,
-        [
-          "<b>📞 Клиент просит оператора</b>",
-          `👤 <b>${escHtml(name)}</b>`,
-          `📱 Telegram: <code>${escHtml(chatId)}</code>`,
-          "Напишите ему в боте или позвоните.",
-        ].join("\n"),
-        { parseMode: "HTML" },
-      );
-    } catch { /* ignore */ }
-    await tg(token, "sendMessage", {
-      chat_id: Number(chatId),
-      text: "Напишите вопрос одним сообщением — диспетчер получит алерт. Или подождите звонка по заявке.",
-      reply_markup: markup(clientMenu("ru")),
-    });
-    return { ok: true };
-  }
-
   const sess = await sql<{ step: string; draft: string; live_order_id: number | null; last_status: string | null }>`
     select step, draft, live_order_id, last_status from as_tg_sessions where user_id = ${uid} and chat_id = ${chatId}
   `;
   let step = (sess[0]?.step ?? "lang") as ChatStep;
   let draft: Draft = sess[0]?.draft ? (JSON.parse(sess[0].draft) as Draft) : emptyDraft();
   draft = { ...emptyDraft(), ...draft, name };
+  const live = Boolean(sess[0]?.live_order_id) || step === "live";
+  const lang = draft.lang === "uz" ? "uz" : "ru";
+
+  if (tapGuess === "cmd:myorders") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await sendClientOrders(sql, uid, token, chatId, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:ref") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await sendClientRef(sql, uid, token, chatId, name, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:profile") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    if (masterExists[0] && draft.role === "master") {
+      await handleMasterMenu(sql, uid, token, chatId, "cmd:profile");
+      return { ok: true };
+    }
+    await persistProfile(sql, uid, chatId, name, draft);
+    await sendClientProfile(sql, uid, token, chatId, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:help") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: lang === "uz"
+        ? "🛠 Usta chaqirish — ariza\n📋 Arizalarim — status\n👤 Profil — ma’lumot\n👥 Do‘stlar — havola\n💬 Yordam — dispatcher"
+        : "🛠 Вызвать мастера — заявка\n📋 Мои заявки — статус\n👤 Профиль — данные\n👥 Друзья — ваша ссылка\n💬 Поддержка — диспетчер увидит алерт",
+      reply_markup: markup(kbClient(lang, live)),
+    });
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:support") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await pushSupportAlert(sql, uid, name, chatId, "Просит оператора");
+    await sql`
+      insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+      values (${uid}, ${chatId}, ${"support"}, ${JSON.stringify(draft)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"support"}, draft = ${JSON.stringify(draft)}, tg_name = ${name}, updated_at = now()
+    `;
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: lang === "uz"
+        ? "Savolingizni bitta xabarda yozing — dispatcher ko‘radi."
+        : "Напишите вопрос одним сообщением — диспетчер увидит в алертах.",
+      reply_markup: markup(kbClient(lang, live)),
+    });
+    return { ok: true };
+  }
   try {
     const saved = await sql<{
       name: string; phone: string; lat: number | null; lng: number | null; district: string; lang: string; role: string;
@@ -1758,7 +1846,8 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     `;
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
-      text: "Заявка отменена. /start — новая.",
+      text: lang === "uz" ? "Ariza bekor qilindi." : "Заявка отменена.",
+      reply_markup: markup(clientMenu(draft.lang)),
     });
     try {
       const { addEvent } = await import("./workspace");
@@ -1798,7 +1887,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
         await tg(token, "sendMessage", {
           chat_id: Number(chatId),
           text: `${reply.text}\n\nЗаявка №${created.publicNo}\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум\nОтмена: /cancel`,
-          reply_markup: markup(clientMenu(draft.lang)),
+          reply_markup: markup(liveMenu(draft.lang)),
         });
       } catch (err) {
         const msgText = err instanceof Error && err.message === "CLIENT_BLOCKED"
@@ -1808,6 +1897,11 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       }
       return { ok: true };
     }
+  }
+
+  if (result.supportText) {
+    await pushSupportAlert(sql, uid, name, chatId, result.supportText);
+    if (sess[0]?.live_order_id) step = "live";
   }
 
   await sql`

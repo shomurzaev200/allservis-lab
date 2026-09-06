@@ -36,6 +36,7 @@ export type ClientListRow = {
   orders_count: number; completed_count: number; cancelled_count: number;
   lang: string; role: string; lat: number | null; lng: number | null;
   paid: boolean; paid_at: string | null;
+  ref_code: string | null; referred_by: string | null; last_master: string | null; last_status: string | null;
 };
 export type ReviewListRow = { id: number; rating: number; comment: string; created_at: string; public_no: number; client_name: string | null; master_name: string | null };
 export type AuditRow = { id: number; action: string; object_type: string; object_id: string; old_value: string | null; new_value: string | null; created_at: string };
@@ -319,7 +320,14 @@ export const listClients = createServerFn({ method: "GET" })
         coalesce(cl.role, 'client') as role,
         cl.lat, cl.lng,
         coalesce(cl.paid, false) as paid,
-        cl.paid_at
+        cl.paid_at,
+        cl.ref_code,
+        cl.referred_by,
+        (select nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '')
+          from as_orders ox left join as_masters m on m.id = ox.master_id
+          where ox.client_id = cl.id and ox.master_id is not null
+          order by coalesce(ox.completed_at, ox.updated_at) desc limit 1) as last_master,
+        (select ox.status from as_orders ox where ox.client_id = cl.id order by ox.created_at desc limit 1) as last_status
       from as_clients cl
       left join as_orders o on o.client_id = cl.id
       where cl.user_id = ${uid}

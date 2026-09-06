@@ -17,7 +17,7 @@ const RU: Dict = {
   master: "Я мастер",
   welcome:
     "Заявку видит администратор. Мастера система сама не назначает.\nВыберите услугу или напишите, что случилось.",
-  help: "Заявка идёт администратору.\n/start — меню\n/cancel — отмена\n/lang — язык",
+  help: "🛠 Вызвать мастера — заявка\n📋 Мои заявки — статус\n👤 Профиль — данные и ссылка\n💬 Поддержка — диспетчер",
   cancelDraft: "Черновик сброшен.",
   needService: "Нажмите кнопку или напишите, например: «течёт кран».",
   describe: "Коротко опишите проблему.",
@@ -41,8 +41,8 @@ const RU: Dict = {
   confirmHint: "Нажмите «Подтвердить» или «Изменить».",
   restart: "Начнём заново. Выберите услугу.",
   missing: "Данных не хватает. /start",
-  live: "Заявка уже у администратора. Статус придёт сюда. /start — новая. /cancel — отмена.",
-  startHint: "Чтобы вызвать мастера — /start.",
+  live: "Заявка у диспетчера. Статус придёт сюда.",
+  startHint: "Чтобы вызвать мастера — нажмите «Вызвать мастера».",
   thanksRate: "Спасибо. Оценка ушла администратору.",
   newOrder: "Новая заявка",
   menu: "Меню",
@@ -63,7 +63,7 @@ const UZ: Dict = {
   master: "Men ustaman",
   welcome:
     "Arizani administrator ko‘radi. Tizim ustani o‘zi tayinlamaydi.\nXizmatni tanlang yoki nima bo‘lganini yozing.",
-  help: "Ariza administratorga ketadi.\n/start — menyu\n/cancel — bekor\n/lang — til",
+  help: "🛠 Usta chaqirish — ariza\n📋 Arizalarim — status\n👤 Profil — ma’lumot va havola\n💬 Yordam — dispatcher",
   cancelDraft: "Qoralama tozalandi.",
   needService: "Tugmani bosing yoki yozing, masalan: «kran oqayapti».",
   describe: "Muammoni qisqa yozing.",
@@ -87,8 +87,8 @@ const UZ: Dict = {
   confirmHint: "«Tasdiqlash» yoki «O‘zgartirish».",
   restart: "Qaytadan. Xizmatni tanlang.",
   missing: "Ma’lumot yetarli emas. /start",
-  live: "Ariza administratorda. Status shu yerga keladi. /start — yangi. /cancel — bekor.",
-  startHint: "Usta chaqirish uchun /start.",
+  live: "Ariza dispatcherga ketdi. Status shu yerga keladi.",
+  startHint: "Usta chaqirish uchun «Usta chaqirish» ni bosing.",
   thanksRate: "Rahmat. Baholash adminga ketdi.",
   newOrder: "Yangi ariza",
   menu: "Menyu",
@@ -205,20 +205,41 @@ function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[]
   ];
 }
 
+function categoryPickKeys(lang: Lang | undefined): KeyboardButton[][] {
+  return [
+    ...categoryKeys(lang),
+    [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Menyuga" : "◀️ В меню" }],
+  ];
+}
+
+function liveMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
+  if (lang === "uz") {
+    return [
+      [{ id: "cmd:myorders", label: "📋 Arizam" }],
+      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:support", label: "💬 Yordam" }],
+      [{ id: "cmd:cancel", label: "❌ Bekor qilish" }],
+    ];
+  }
+  return [
+    [{ id: "cmd:myorders", label: "📋 Моя заявка" }],
+    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:support", label: "💬 Поддержка" }],
+    [{ id: "cmd:cancel", label: "❌ Отменить заявку" }],
+  ];
+}
+
 function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
-  return [...categoryKeys(lang), ...(lang === "uz"
-    ? [
-        [{ id: "cmd:myorders", label: "📋 Arizalarim" }, { id: "cmd:ref", label: "👥 Do‘stlar" }],
-        [{ id: "cmd:help", label: "🆘 Yordam" }, { id: "cmd:support", label: "📞 Operator" }],
-        [{ id: "cmd:lang", label: "🌐 Til" }, { id: "role:master", label: "🛠 Usta" }],
-        [{ id: "cmd:start", label: "🆕 Yangi ariza" }, { id: "cmd:cancel", label: "❌ Bekor" }],
-      ]
-    : [
-        [{ id: "cmd:myorders", label: "📋 Мои заявки" }, { id: "cmd:ref", label: "👥 Друзья" }],
-        [{ id: "cmd:help", label: "🆘 Помощь" }, { id: "cmd:support", label: "📞 Оператор" }],
-        [{ id: "cmd:lang", label: "🌐 Язык" }, { id: "role:master", label: "🛠 Стать мастером" }],
-        [{ id: "cmd:start", label: "🆕 Новая заявка" }, { id: "cmd:cancel", label: "❌ Отмена" }],
-      ])];
+  if (lang === "uz") {
+    return [
+      [{ id: "cmd:order", label: "🛠 Usta chaqirish" }],
+      [{ id: "cmd:myorders", label: "📋 Arizalarim" }, { id: "cmd:profile", label: "👤 Profil" }],
+      [{ id: "cmd:ref", label: "👥 Do‘stlar" }, { id: "cmd:support", label: "💬 Yordam" }],
+    ];
+  }
+  return [
+    [{ id: "cmd:order", label: "🛠 Вызвать мастера" }],
+    [{ id: "cmd:myorders", label: "📋 Мои заявки" }, { id: "cmd:profile", label: "👤 Профиль" }],
+    [{ id: "cmd:ref", label: "👥 Друзья" }, { id: "cmd:support", label: "💬 Поддержка" }],
+  ];
 }
 
 function bot(text: string, extra?: Partial<ChatMessage>): ChatMessage {
@@ -266,6 +287,7 @@ export type BotResult = {
   cancelLive?: boolean;
   registerMaster?: boolean;
   setOnline?: boolean;
+  supportText?: string;
 };
 
 function nearestDistrict(lat: number, lng: number) {
@@ -323,7 +345,23 @@ function summary(d: Draft): string {
 }
 
 function fold(s: string) {
-  return s.toLowerCase().replace(/[‘’ʻʼ`']/g, "'").replace(/\s+/g, " ").trim();
+  return s
+    .toLowerCase()
+    .replace(/[‘’ʻʼ`']/g, "'")
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function allMenuRows(lang: Lang): KeyboardButton[][] {
+  return [
+    ...clientMenuKeys(lang),
+    ...categoryPickKeys(lang),
+    ...liveMenuKeys(lang),
+    ...masterMenuKeys(lang, true),
+    ...masterMenuKeys(lang, false),
+    ...roleKeys(lang),
+  ];
 }
 
 export function labelToTapId(raw: string): string | null {
@@ -334,33 +372,36 @@ export function labelToTapId(raw: string): string | null {
   if (q === fold(RU.client) || q === fold(UZ.client)) return "role:client";
   if (q === fold(RU.master) || q === fold(UZ.master)) return "role:master";
   for (const lang of ["ru", "uz"] as Lang[]) {
-    for (const row of categoryKeys(lang)) {
+    for (const row of allMenuRows(lang)) {
       for (const b of row) if (fold(b.label) === q) return b.id;
     }
     for (const row of districtKeys(lang)) {
       for (const b of row) if (fold(b.label) === q) return b.id;
     }
   }
-  if (q === fold(RU.skipPhoto) || q === fold(UZ.skipPhoto) || q.includes("пропуст")) return "photo:skip";
+  if (q === fold(RU.skipPhoto) || q === fold(UZ.skipPhoto) || q.includes("пропуст") || q.includes("fotosiz")) return "photo:skip";
   if (q === fold(RU.skipGeo) || q === fold(UZ.skipGeo)) return "geo:skip";
-  if (q === fold(RU.skipComment) || q === fold(UZ.skipComment)) return "cmt:skip";
-  if (q === fold(RU.confirm) || q === "подтвердить") return "confirm:yes";
+  if (q === fold(RU.skipComment) || q === fold(UZ.skipComment) || q.includes("изохсиз")) return "cmt:skip";
+  if (q === fold(RU.confirm) || q === "подтвердить" || q === "tasdiqlash") return "confirm:yes";
   if (q === fold(RU.change) || q.includes("измен") || q.includes("zgartir")) return "confirm:no";
   if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman") || q.includes("на линии")) return "online:on";
   if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn") || q.includes("офлайн")) return "online:off";
+  if (q.includes("вызвать") || q.includes("chaqirish") || q === "услуги" || q === "xizmat") return "cmd:order";
   if (q.includes("доступн") || q.startsWith("⚡") || q.includes("buyurtma")) return "cmd:jobs";
-  if (q.includes("локац") || q.includes("lokatsiya") || q === "📍 локация") return "cmd:loc";
+  if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
   if (q.includes("профиль") || q.includes("profil") || q.includes("баланс")) return "cmd:profile";
+  if (q.includes("заявк") || q.includes("ariza")) return "cmd:myorders";
   if (q.includes("активн") || q.includes("faol")) return "cmd:active";
-  if (q.includes("статисти") || q.includes("statistika") || q.startsWith("📊")) return "cmd:stats";
-  if (q.startsWith("🆘") || q === "/help" || q === "помощь" || q === "yordam") return "cmd:help";
-  if (q.startsWith("📞") || q === "оператор" || q === "operator") return "cmd:support";
-  if (q.includes("друг") || q.includes("do‘st") || q.includes("dostlar") || q.includes("реферал") || q === "/ref") return "cmd:ref";
-  if (q.includes("режим клиента") || q.includes("mijoz rejim") || q === "👤 клиент" || q === "👤 mijoz") return "role:client";
-  if (q.includes("стать мастером") || q.includes("usta bo") || q === "🛠 usta") return "role:master";
-  if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder) || q.startsWith("🆕")) return "cmd:start";
-  if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:start";
-  if (q.startsWith("❌") || q === "/cancel") return "cmd:cancel";
+  if (q.includes("статисти") || q.includes("statistika")) return "cmd:stats";
+  if (q.includes("помощ") || q.includes("yordam") || q === "/help" || q.includes("поддерж") || q === "оператор" || q === "operator") return "cmd:support";
+  if (q.includes("друз") || q.includes("do'st") || q.includes("dostlar") || q.includes("реферал") || q === "/ref") return "cmd:ref";
+  if (q.includes("язык") || q === "til" || q === "/lang") return "cmd:lang";
+  if (q.includes("меню") || q.includes("menyu") || q.includes("назад")) return "cmd:menu";
+  if (q.includes("режим клиента") || q.includes("mijoz rejim") || q === "клиент") return "role:client";
+  if (q.includes("стать мастером") || q.includes("usta bo") || q === "мастер") return "role:master";
+  if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder)) return "cmd:start";
+  if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:menu";
+  if (q.includes("отмен") || q.includes("bekor") || q === "/cancel") return "cmd:cancel";
   return null;
 }
 
@@ -476,6 +517,14 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (lower === "/start" || tapId === "cmd:start") {
+    if (step === "live") {
+      return {
+        userMessage: user("/start"),
+        replies: [bot(t(lang, "live"), { buttons: liveMenuKeys(lang) })],
+        step: "live",
+        draft,
+      };
+    }
     const registered = !!(draft.phone && draft.lat && draft.lang);
     if (registered) {
       return {
@@ -505,6 +554,14 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   if (tapId === "lang:ru" || tapId === "lang:uz" || lower === "русский" || lower.includes("zbek")) {
     const nextLang: Lang = tapId === "lang:uz" || lower.includes("zbek") ? "uz" : "ru";
     const d = { ...draft, lang: nextLang };
+    if (step === "live") {
+      return {
+        userMessage: user(nextLang === "uz" ? "O‘zbekcha" : "Русский"),
+        replies: [bot(t(nextLang, "live"), { buttons: liveMenuKeys(nextLang) })],
+        step: "live",
+        draft: d,
+      };
+    }
     return {
       userMessage: user(nextLang === "uz" ? "O‘zbekcha" : "Русский"),
       replies: [bot(t(nextLang, "pickRole"), { buttons: roleKeys(nextLang) })],
@@ -526,7 +583,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     }
     return {
       userMessage: user(t(lang, "client")),
-      replies: [bot(t(lang, "welcome"), { buttons: categoryKeys(lang) })],
+      replies: [bot(t(lang, "welcome"), { buttons: clientMenuKeys(lang) })],
       step: "category",
       draft: d,
     };
@@ -544,7 +601,55 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (lower === "/help" || tapId === "cmd:help") {
-    return { userMessage: user("?"), replies: [bot(t(lang, "help"))], step, draft };
+    return { userMessage: user("?"), replies: [bot(t(lang, "help"), { buttons: clientMenuKeys(lang) })], step: step === "live" ? "live" : "category", draft };
+  }
+
+  if (tapId === "cmd:order") {
+    if (step === "live") {
+      return {
+        userMessage: user(lang === "uz" ? "Usta chaqirish" : "Вызвать мастера"),
+        replies: [bot(lang === "uz"
+          ? "Faol ariza bor. Avval bekor qiling."
+          : "Сначала закройте текущую заявку — «Отменить заявку».", { buttons: liveMenuKeys(lang) })],
+        step: "live",
+        draft,
+      };
+    }
+    return {
+      userMessage: user(lang === "uz" ? "Usta chaqirish" : "Вызвать мастера"),
+      replies: [bot(lang === "uz" ? "Xizmatni tanlang:" : "Выберите услугу:", { buttons: categoryPickKeys(lang) })],
+      step: "category",
+      draft: { ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined, role: "client" },
+    };
+  }
+
+  if (tapId === "cmd:menu") {
+    if (step === "live") {
+      return {
+        userMessage: user(lang === "uz" ? "Menyu" : "Меню"),
+        replies: [bot(t(lang, "live"), { buttons: liveMenuKeys(lang) })],
+        step: "live",
+        draft,
+      };
+    }
+    return {
+      userMessage: user(lang === "uz" ? "Menyu" : "Меню"),
+      replies: [bot(t(lang, "welcome"), { buttons: clientMenuKeys(lang) })],
+      step: "category",
+      draft: { ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined },
+    };
+  }
+
+  if (tapId === "cmd:support") {
+    return {
+      userMessage: user(lang === "uz" ? "Yordam" : "Поддержка"),
+      replies: [bot(
+        lang === "uz" ? "Savolingizni bitta xabarda yozing — dispatcher ko‘radi." : "Напишите вопрос одним сообщением — диспетчер увидит.",
+        { buttons: step === "live" ? liveMenuKeys(lang) : clientMenuKeys(lang) },
+      )],
+      step: "support",
+      draft,
+    };
   }
 
   if (lower === "/cancel" || tapId === "cmd:cancel") {
@@ -559,7 +664,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     }
     return {
       userMessage: user("/cancel"),
-      replies: [bot(t(lang, "cancelDraft") + "\n" + t(lang, "welcome"), { buttons: categoryKeys(lang) })],
+      replies: [bot(t(lang, "cancelDraft") + "\n" + t(lang, "welcome"), { buttons: clientMenuKeys(lang) })],
       step: "category",
       draft: { ...emptyDraft(), lang, role: draft.role, name: draft.name },
     };
@@ -644,7 +749,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (!svc) {
       return {
         userMessage,
-        replies: [bot(t(lang, "needService"), { buttons: categoryKeys(lang) })],
+        replies: [bot(t(lang, "needService"), { buttons: clientMenuKeys(lang) })],
         step: "category",
         draft,
       };
@@ -774,7 +879,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (tapId === "confirm:no" || lower.includes("измен") || lower.includes("zgartir")) {
       return {
         userMessage: user(t(lang, "change")),
-        replies: [bot(t(lang, "restart"), { buttons: categoryKeys(lang) })],
+        replies: [bot(t(lang, "restart"), { buttons: clientMenuKeys(lang) })],
         step: "category",
         draft: { ...emptyDraft(), lang, role: "client", name: draft.name },
       };
@@ -807,19 +912,44 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     };
   }
 
+  if (step === "support") {
+    if (tapId.startsWith("cmd:") || tapId.startsWith("svc:") || tapId.startsWith("role:") || tapId.startsWith("lang:")) {
+      /* handled above or below */
+    } else if (raw) {
+      return {
+        userMessage: user(raw),
+        replies: [bot(lang === "uz" ? "Dispatcher oldi. Javob shu yerga keladi." : "Передал диспетчеру. Ответ придёт сюда.", { buttons: clientMenuKeys(lang) })],
+        step: "category",
+        draft,
+        supportText: raw,
+      };
+    }
+  }
+
   if (step === "live") {
     const svcLive = tapId.startsWith("svc:") ? serviceById(tapId.slice(4)) : matchService(raw);
     if (svcLive) {
       return {
         userMessage: user(lang === "uz" ? SVC_UZ[svcLive.id] : svcLive.title),
-        replies: [bot(`${lang === "uz" ? SVC_UZ[svcLive.id] : svcLive.title}. ${t(lang, "describe")}`)],
-        step: "problem",
-        draft: { ...draft, serviceId: svcLive.id, photos: [], problem: undefined, comment: undefined, role: "client" },
+        replies: [bot(lang === "uz"
+          ? "Sizda faol ariza bor. Avval «Bekor qilish» — keyin yangi xizmat."
+          : "У вас уже есть заявка. Сначала «Отменить заявку» — потом новую услугу.", { buttons: liveMenuKeys(lang) })],
+        step: "live",
+        draft,
+      };
+    }
+    if (raw && !tapId.startsWith("cmd:") && !tapId.startsWith("rate:")) {
+      return {
+        userMessage: user(raw),
+        replies: [bot(lang === "uz" ? "Dispatcher oldi." : "Передал диспетчеру.", { buttons: liveMenuKeys(lang) })],
+        step: "live",
+        draft,
+        supportText: raw,
       };
     }
     return {
       userMessage: user(raw),
-      replies: [bot(t(lang, "live"), { buttons: clientMenuKeys(lang) })],
+      replies: [bot(t(lang, "live"), { buttons: liveMenuKeys(lang) })],
       step: "live",
       draft,
     };
@@ -840,7 +970,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
   return {
     userMessage: user(raw),
-    replies: [bot(t(lang, "startHint"), { buttons: categoryKeys(lang) })],
+    replies: [bot(t(lang, "startHint"), { buttons: clientMenuKeys(lang) })],
     step: "category",
     draft,
   };
@@ -868,6 +998,12 @@ export function statusReply(status: OrderStatus, masterName?: string | null, lan
 
 export function clientMenu(lang?: Lang) {
   return clientMenuKeys(lang);
+}
+export function liveMenu(lang?: Lang) {
+  return liveMenuKeys(lang);
+}
+export function categoryMenu(lang?: Lang) {
+  return categoryPickKeys(lang);
 }
 export function masterMenu(lang?: Lang, online = true) {
   return masterMenuKeys(lang, online);

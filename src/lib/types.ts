@@ -13,6 +13,7 @@ export type ChatStep =
   | "comment"
   | "confirm"
   | "live"
+  | "support"
   | "rate"
   | "idle"
   | "master_spec"
