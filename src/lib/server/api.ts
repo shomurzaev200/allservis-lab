@@ -543,20 +543,30 @@ export const getBotSettings = createServerFn({ method: "GET" })
       bot_username: string | null; webhook_id: string | null; bot_connected_at: string | null; bot_token: string | null;
       poll_mode: boolean; channel_username: string | null; pay_card: string | null; pay_bank: string | null;
       pay_holder: string | null; pay_amount: number; alerts_channel_id: string | null; last_alert_error?: string | null;
+      require_subscribe?: boolean;
     };
     let w: WsRow | undefined;
     try {
       const row = await sql<WsRow>`
         select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
-          channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id, last_alert_error
+          channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id, last_alert_error,
+          require_subscribe
         from as_workspace where user_id = ${uid}`;
       w = row[0];
     } catch {
-      const row = await sql<WsRow>`
-        select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
-          channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id
-        from as_workspace where user_id = ${uid}`;
-      w = row[0];
+      try {
+        const row = await sql<WsRow>`
+          select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
+            channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id, last_alert_error
+          from as_workspace where user_id = ${uid}`;
+        w = row[0];
+      } catch {
+        const row = await sql<WsRow>`
+          select bot_username, webhook_id, bot_connected_at, bot_token, poll_mode,
+            channel_username, pay_card, pay_bank, pay_holder, pay_amount, alerts_channel_id
+          from as_workspace where user_id = ${uid}`;
+        w = row[0];
+      }
     }
     const token = w?.bot_token ?? "";
     const canBots = can(actor, "bots");
@@ -575,6 +585,7 @@ export const getBotSettings = createServerFn({ method: "GET" })
       payAmount: n(w?.pay_amount),
       alertsChannel: canBots ? (w?.alerts_channel_id ?? "") : "",
       lastAlertError: canBots ? (w?.last_alert_error ?? "") : "",
+      requireSubscribe: w?.require_subscribe !== false,
       role: actor.role,
       email: actor.email,
     };
@@ -865,25 +876,42 @@ export const removeServiceBot = createServerFn({ method: "POST" })
 
 export const saveRequisites = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { channel?: string; payCard?: string; payBank?: string; payHolder?: string; payAmount?: number; alertsChannel?: string }) => d)
+  .validator((d: { channel?: string; payCard?: string; payBank?: string; payHolder?: string; payAmount?: number; alertsChannel?: string; requireSubscribe?: boolean }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
     if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM };
-    const channel = (data.channel ?? "").replace(/^@/, "").trim();
+    let channel = (data.channel ?? "").trim();
+    channel = channel.replace(/^https?:\/\//i, "").replace(/^(?:t\.me|telegram\.me)\//i, "").replace(/^@/, "");
+    channel = channel.split(/[?#]/)[0].replace(/\/$/, "");
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
     const rawAlerts = (data.alertsChannel ?? "").trim();
     const alerts = rawAlerts ? normalizeChatId(rawAlerts) : "";
-    await sql`
-      update as_workspace set
-        channel_username = ${channel || null},
-        pay_card = ${data.payCard?.trim() || null},
-        pay_bank = ${data.payBank?.trim() || null},
-        pay_holder = ${data.payHolder?.trim() || null},
-        pay_amount = ${amount},
-        alerts_channel_id = ${alerts || null}
-      where user_id = ${uid}
-    `;
+    const requireSub = data.requireSubscribe !== false;
+    try {
+      await sql`
+        update as_workspace set
+          channel_username = ${channel || null},
+          require_subscribe = ${requireSub},
+          pay_card = ${data.payCard?.trim() || null},
+          pay_bank = ${data.payBank?.trim() || null},
+          pay_holder = ${data.payHolder?.trim() || null},
+          pay_amount = ${amount},
+          alerts_channel_id = ${alerts || null}
+        where user_id = ${uid}
+      `;
+    } catch {
+      await sql`
+        update as_workspace set
+          channel_username = ${channel || null},
+          pay_card = ${data.payCard?.trim() || null},
+          pay_bank = ${data.payBank?.trim() || null},
+          pay_holder = ${data.payHolder?.trim() || null},
+          pay_amount = ${amount},
+          alerts_channel_id = ${alerts || null}
+        where user_id = ${uid}
+      `;
+    }
     if (alerts) {
       await sql`update as_bots set log_chat_id = ${alerts} where user_id = ${uid} and kind = ${"logs"}`;
       const sent = await sendWorkspaceAlertTest(sql, uid, alerts);

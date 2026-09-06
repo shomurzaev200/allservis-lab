@@ -25,6 +25,7 @@ function SettingsInner() {
   const [extraLabel, setExtraLabel] = useState("");
   const [logToken, setLogToken] = useState("");
   const [channel, setChannel] = useState("");
+  const [requireSubscribe, setRequireSubscribe] = useState(true);
   const [payCard, setPayCard] = useState("");
   const [payBank, setPayBank] = useState("");
   const [payHolder, setPayHolder] = useState("");
@@ -34,6 +35,7 @@ function SettingsInner() {
   useEffect(() => {
     if (!data) return;
     setChannel(data.channel ?? "");
+    setRequireSubscribe(data.requireSubscribe !== false);
     setPayCard(data.payCard ?? "");
     setPayBank(data.payBank ?? "");
     setPayHolder(data.payHolder ?? "");
@@ -62,7 +64,7 @@ function SettingsInner() {
       });
       if (bot.ok && alertsChannel.trim()) {
         await saveRequisites({
-          data: { channel, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel },
+          data: { channel, requireSubscribe, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel },
         });
       }
       return bot;
@@ -75,7 +77,7 @@ function SettingsInner() {
   });
   const reqs = useMutation({
     mutationFn: () => saveRequisites({
-      data: { channel, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel },
+      data: { channel, requireSubscribe, payCard, payBank, payHolder, payAmount: Number(payAmount) || 0, alertsChannel },
     }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
   });
@@ -199,16 +201,34 @@ function SettingsInner() {
         </div>
       </section>
 
+      <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
+        <h2 className="font-medium">Обязательная подписка на канал</h2>
+        <p className="text-sm text-muted">
+          Клиент не вызовет мастера, пока не подпишется. Основной бот должен быть <span className="text-fg">админом этого канала</span>
+          — иначе Telegram не покажет, подписан человек или нет.
+        </p>
+        <label className="flex items-center gap-2 text-sm">
+          <input type="checkbox" checked={requireSubscribe} onChange={(e) => setRequireSubscribe(e.target.checked)} />
+          Требовать подписку
+        </label>
+        <label className="block text-sm">
+          <span className="text-muted">Канал: @username или t.me/имя</span>
+          <Input className="mt-1 font-mono" placeholder="allservis_uz или https://t.me/allservis_uz" value={channel} onChange={(e) => setChannel(e.target.value)} />
+        </label>
+        <p className="text-xs text-muted">
+          Это публичный канал для клиентов. Канал алертов (закрытый, −100…) сюда не подходит — его поле выше, в «Алерты».
+        </p>
+        {reqs.data?.ok ? <p className="text-sm text-ok">Сохранено. Напишите боту /start с другого аккаунта — должен попросить подписку.</p> : null}
+        <Button disabled={reqs.isPending} onClick={() => reqs.mutate()}>
+          {reqs.isPending ? "Сохраняю…" : "Сохранить подписку и реквизиты"}
+        </Button>
+      </section>
+
       <section className="glass-card space-y-4 rounded-xl p-5">
-        <h2 className="font-medium">Реквизиты и обязательная подписка</h2>
+        <h2 className="font-medium">Реквизиты оплаты</h2>
         <p className="text-sm text-muted">
           Если указать карту или сумму — клиент должен прислать скрин перевода, пока вы не подтвердите в «Пополнения».
-          Канал: бот должен быть админом канала.
         </p>
-        <label className="block text-sm">
-          <span className="text-muted">Канал без @</span>
-          <Input className="mt-1" placeholder="allservis_uz" value={channel} onChange={(e) => setChannel(e.target.value)} />
-        </label>
         <label className="block text-sm">
           <span className="text-muted">Банк</span>
           <Input className="mt-1" placeholder="Uzcard / Humo / Click" value={payBank} onChange={(e) => setPayBank(e.target.value)} />

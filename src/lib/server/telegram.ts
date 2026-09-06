@@ -1010,6 +1010,109 @@ function payText(card: string, bank: string, holder: string, amount: number) {
   return lines.filter(Boolean).join("\n");
 }
 
+function parseSubChannel(raw: string): { username: string; chatIds: string[]; url: string } {
+  const out = { username: "", chatIds: [] as string[], url: "" };
+  let s = (raw ?? "").trim();
+  if (!s) return out;
+  s = s.replace(/^https?:\/\//i, "").replace(/^www\./i, "");
+  s = s.replace(/^(?:t\.me|telegram\.me)\//i, "").replace(/^@/, "");
+  s = s.split(/[?#]/)[0].replace(/\/$/, "");
+  if (s.startsWith("c/")) {
+    const id = s.slice(2).split("/")[0] ?? "";
+    if (/^\d+$/.test(id)) {
+      out.chatIds.push(`-100${id}`);
+      out.url = `https://t.me/c/${id}`;
+    }
+    return out;
+  }
+  if (s.startsWith("+") || s.toLowerCase().startsWith("joinchat/")) {
+    out.url = `https://t.me/${s}`;
+    return out;
+  }
+  const user = (s.split("/")[0] ?? "").replace(/[^A-Za-z0-9_]/g, "");
+  if (user.length >= 4) {
+    out.username = user;
+    out.chatIds.push(`@${user}`);
+    out.url = `https://t.me/${user}`;
+  }
+  return out;
+}
+
+async function isChannelMember(token: string, chatRef: string, userId: number): Promise<boolean> {
+  const member = await tg(token, "getChatMember", { chat_id: chatRef, user_id: userId });
+  if (!member.ok || !member.result || Array.isArray(member.result)) return false;
+  const st = String((member.result as { status?: string }).status ?? "");
+  return st === "member" || st === "administrator" || st === "creator" || st === "restricted";
+}
+
+async function subscribeUrl(token: string, parsed: { username: string; chatIds: string[]; url: string }): Promise<string> {
+  if (parsed.url.startsWith("https://t.me/") && !parsed.url.includes("/c/")) return parsed.url;
+  for (const id of parsed.chatIds) {
+    const inv = await tg(token, "exportChatInviteLink", { chat_id: id });
+    if (inv.ok && typeof inv.result === "string" && inv.result.startsWith("http")) return inv.result;
+    const created = await tg(token, "createChatInviteLink", { chat_id: id, name: "All Servis" });
+    if (created.ok && created.result && !Array.isArray(created.result)) {
+      const link = String((created.result as { invite_link?: string }).invite_link ?? "");
+      if (link.startsWith("http")) return link;
+    }
+  }
+  return parsed.url;
+}
+
+async function clientMustSubscribe(
+  sql: Sql,
+  uid: string,
+  token: string,
+  fromId: number,
+): Promise<{ block: boolean; url: string; label: string }> {
+  let channel = "";
+  let requireSub = true;
+  try {
+    const row = await sql<{ channel_username: string | null; require_subscribe?: boolean }>`
+      select channel_username, require_subscribe from as_workspace where user_id = ${uid}
+    `;
+    channel = (row[0]?.channel_username ?? "").trim();
+    requireSub = row[0]?.require_subscribe !== false;
+  } catch {
+    try {
+      const row = await sql<{ channel_username: string | null }>`
+        select channel_username from as_workspace where user_id = ${uid}
+      `;
+      channel = (row[0]?.channel_username ?? "").trim();
+    } catch {
+      return { block: false, url: "", label: "" };
+    }
+  }
+  if (!requireSub || !channel) return { block: false, url: "", label: "" };
+  const parsed = parseSubChannel(channel);
+  if (!parsed.chatIds.length && !parsed.url) return { block: false, url: "", label: "" };
+  for (const id of parsed.chatIds) {
+    if (await isChannelMember(token, id, fromId)) return { block: false, url: "", label: "" };
+  }
+  const url = await subscribeUrl(token, parsed);
+  const label = parsed.username ? `@${parsed.username}` : "канал";
+  return { block: true, url: url || `https://t.me/${parsed.username}`, label };
+}
+
+async function sendSubscribePrompt(token: string, chatId: string, cbId: string | undefined, url: string, label: string) {
+  if (cbId) await tg(token, "answerCallbackQuery", { callback_query_id: cbId, text: "Сначала подпишитесь на канал", show_alert: true });
+  const buttons: { text: string; url?: string; callback_data?: string }[][] = [];
+  if (url) buttons.push([{ text: `📢 Открыть ${label}`, url }]);
+  buttons.push([{ text: "✅ Я подписался", callback_data: "sub:ok" }]);
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text: [
+      `📢 Чтобы вызвать мастера, подпишитесь на ${label}.`,
+      `Usta chaqirish uchun ${label} kanaliga obuna bo‘ling.`,
+      "",
+      "1) Нажмите «Открыть» и подпишитесь",
+      "2) Вернитесь и нажмите «Я подписался»",
+    ].join("\n"),
+    reply_markup: { inline_keyboard: buttons },
+    disable_web_page_preview: true,
+  });
+}
+
 async function gated(
   sql: Sql,
   uid: string,
@@ -1020,37 +1123,26 @@ async function gated(
   cb: TgUpdate["callback_query"],
 ): Promise<boolean> {
   const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Клиент Telegram";
-  let settings: { channel_username: string | null; pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number } | undefined;
+  const masterRow = await sql<{ id: number }>`
+    select id from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  if (!masterRow[0]) {
+    const sub = await clientMustSubscribe(sql, uid, token, from.id);
+    if (sub.block) {
+      await sendSubscribePrompt(token, chatId, cb?.id, sub.url, sub.label);
+      return true;
+    }
+  }
+
+  let settings: { pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number } | undefined;
   try {
     settings = (await sql<{
-      channel_username: string | null; pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number;
+      pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number;
     }>`
-      select channel_username, pay_card, pay_bank, pay_holder, pay_amount from as_workspace where user_id = ${uid}
+      select pay_card, pay_bank, pay_holder, pay_amount from as_workspace where user_id = ${uid}
     `)[0];
   } catch {
     return false;
-  }
-  const channel = (settings?.channel_username ?? "").replace(/^@/, "").trim();
-  if (channel) {
-    const member = await tg(token, "getChatMember", { chat_id: `@${channel}`, user_id: from.id });
-    const st = member.ok && member.result && !Array.isArray(member.result)
-      ? String((member.result as Record<string, unknown>).status ?? "")
-      : "";
-    const ok = st === "member" || st === "administrator" || st === "creator";
-    if (!ok) {
-      if (cb?.id) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id, text: "Подписка не найдена" });
-      await tg(token, "sendMessage", {
-        chat_id: Number(chatId),
-        text: `Сначала подпишитесь на канал @${channel}, затем нажмите «Я подписался».`,
-        reply_markup: {
-          inline_keyboard: [
-            [{ text: `Открыть @${channel}`, url: `https://t.me/${channel}` }],
-            [{ text: "Я подписался", callback_data: "sub:ok" }],
-          ],
-        },
-      });
-      return true;
-    }
   }
 
   const amount = nSafe(settings?.pay_amount);
@@ -1467,7 +1559,10 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   } catch { /* ignore */ }
 
   let event: BotEvent | null = null;
-  if (cb?.data) {
+  if (cb?.data === "sub:ok") {
+    event = { type: "text", text: "/start" };
+    await tg(token, "answerCallbackQuery", { callback_query_id: cb.id, text: "Подписка есть — можно вызывать мастера" });
+  } else if (cb?.data) {
     event = { type: "tap", id: cb.data, label: cb.data };
     await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
   } else if (msg?.location) {
@@ -1543,6 +1638,11 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     const dist = result.submit.districtId ? districtById(result.submit.districtId) : undefined;
     const svc = result.submit.serviceId ? serviceById(result.submit.serviceId) : undefined;
     if (dist && svc && result.submit.problem && result.submit.phone) {
+      const sub = await clientMustSubscribe(sql, uid, token, from.id);
+      if (sub.block) {
+        await sendSubscribePrompt(token, chatId, undefined, sub.url, sub.label);
+        return { ok: true };
+      }
       try {
         const created = await insertOrder(sql, uid, {
           name,
