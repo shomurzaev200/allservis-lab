@@ -1,0 +1,17 @@
+[Unit]
+Description=All Servis
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/fjord-acre-sky-solar
+EnvironmentFile=/home/ubuntu/fjord-acre-sky-solar/.env
+Environment=NODE_ENV=development
+ExecStart=/usr/bin/npm run dev
+Restart=on-failure
+RestartSec=5
+# Vite binds 0.0.0.0:8080. Put Caddy/nginx in front for https.
+
+[Install]
+WantedBy=multi-user.target
