@@ -4,6 +4,7 @@ import type { OnlineStatus, OrderStatus } from "@/lib/domain";
 export type Sql = Awaited<ReturnType<typeof import("@/lib/db").getSql>>;
 
 const shiftStarted = new Set<string>();
+const purgedGhosts = new Set<string>();
 
 export async function ensureWorkspace(sql: Sql, userId: string) {
   const existing = await sql<{ user_id: string }>`
@@ -14,6 +15,40 @@ export async function ensureWorkspace(sql: Sql, userId: string) {
     shiftStarted.add(userId);
     return;
   }
+  if (!shiftStarted.has(userId)) {
+    shiftStarted.add(userId);
+    await sql`
+      update as_masters
+      set last_seen = now(),
+          online_status = case when online_status = 'blocked' then 'blocked' else 'online' end
+      where user_id = ${userId}
+    `;
+  }
+  if (!purgedGhosts.has(userId)) {
+    purgedGhosts.add(userId);
+    await purgeGhostClients(sql, userId);
+  }
+}
+
+async function purgeGhostClients(sql: Sql, userId: string) {
+  try {
+    const ghosts = await sql<{ id: number }>`
+      select id from as_clients
+      where user_id = ${userId}
+        and (name = ${"Удалён"} or telegram_id is null or length(coalesce(telegram_id, '')) < 8)
+    `;
+    for (const g of ghosts) {
+      await sql`delete from as_order_events where user_id = ${userId} and order_id in (select id from as_orders where client_id = ${g.id})`;
+      await sql`delete from as_notifications where user_id = ${userId} and order_id in (select id from as_orders where client_id = ${g.id})`;
+      await sql`delete from as_reviews where user_id = ${userId} and client_id = ${g.id}`;
+      try { await sql`delete from as_payments where user_id = ${userId} and client_id = ${g.id}`; } catch { /* ignore */ }
+      await sql`delete from as_orders where user_id = ${userId} and client_id = ${g.id}`;
+      await sql`delete from as_clients where user_id = ${userId} and id = ${g.id}`;
+    }
+  } catch {
+    /* ignore */
+  }
+}
   if (!shiftStarted.has(userId)) {
     shiftStarted.add(userId);
     await sql`

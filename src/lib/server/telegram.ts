@@ -1,5 +1,5 @@
 import { getSql } from "@/lib/db";
-import { districtById, serviceById } from "@/lib/catalog";
+import { DISTRICTS, districtById, serviceById } from "@/lib/catalog";
 import { clientLabel, type OrderStatus } from "@/lib/domain";
 import { emptyDraft, reduceBot, statusReply, clientMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
@@ -953,6 +953,28 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   let step = (sess[0]?.step ?? "lang") as ChatStep;
   let draft: Draft = sess[0]?.draft ? (JSON.parse(sess[0].draft) as Draft) : emptyDraft();
   draft = { ...emptyDraft(), ...draft, name };
+  try {
+    const saved = await sql<{
+      name: string; phone: string; lat: number | null; lng: number | null; district: string; lang: string; role: string;
+    }>`
+      select name, phone, lat, lng, district, lang, role from as_clients
+      where user_id = ${uid} and telegram_id = ${chatId} limit 1
+    `;
+    const s = saved[0];
+    if (s) {
+      const distId = DISTRICTS.find((d) => d.title === s.district)?.id ?? draft.districtId;
+      draft = {
+        ...draft,
+        name: s.name || draft.name,
+        phone: s.phone || draft.phone,
+        lat: s.lat ?? draft.lat,
+        lng: s.lng ?? draft.lng,
+        districtId: distId,
+        lang: (s.lang === "uz" ? "uz" : "ru") as Draft["lang"],
+        role: s.role === "master" ? "master" : "client",
+      };
+    }
+  } catch { /* ignore */ }
 
   let event: BotEvent | null = null;
   if (cb?.data) {
@@ -1000,8 +1022,8 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now() where user_id = ${uid} and id = ${oid} and status not in ('completed','cancelled')`;
     await sql`
       insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
-      values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify(emptyDraft())}, ${null}, ${"cancelled"}, ${name}, now())
-      on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify(emptyDraft())}, live_order_id = ${null}, last_status = ${"cancelled"}, tg_name = ${name}, updated_at = now()
+      values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify({ ...emptyDraft(), name, lang: draft.lang, phone: draft.phone, lat: draft.lat, lng: draft.lng, districtId: draft.districtId })}, ${null}, ${"cancelled"}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify({ ...emptyDraft(), name, lang: draft.lang, phone: draft.phone, lat: draft.lat, lng: draft.lng, districtId: draft.districtId })}, live_order_id = ${null}, last_status = ${"cancelled"}, tg_name = ${name}, updated_at = now()
     `;
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),

@@ -204,16 +204,15 @@ function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[]
 }
 
 function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
-  if (lang === "uz") {
-    return [
-      [{ id: "cmd:start", label: "🆕 Yangi ariza" }, { id: "cmd:myorders", label: "📋 Mening arizalarim" }],
-      [{ id: "role:master", label: "🛠 Usta bo‘lish" }, { id: "cmd:lang", label: "🌐 Til" }],
-    ];
-  }
-  return [
-    [{ id: "cmd:start", label: "🆕 Новая заявка" }, { id: "cmd:myorders", label: "📋 Мои заявки" }],
-    [{ id: "role:master", label: "🛠 Стать мастером" }, { id: "cmd:lang", label: "🌐 Язык" }],
-  ];
+  return [...categoryKeys(lang), ...(lang === "uz"
+    ? [
+        [{ id: "cmd:myorders", label: "📋 Mening arizalarim" }, { id: "cmd:lang", label: "🌐 Til" }],
+        [{ id: "role:master", label: "🛠 Usta bo‘lish" }],
+      ]
+    : [
+        [{ id: "cmd:myorders", label: "📋 Мои заявки" }, { id: "cmd:lang", label: "🌐 Язык" }],
+        [{ id: "role:master", label: "🛠 Стать мастером" }],
+      ])];
 }
 
 function bot(text: string, extra?: Partial<ChatMessage>): ChatMessage {
@@ -392,13 +391,25 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   if (event.type === "photo") {
     if (step !== "photo") return { replies: [], step, draft };
     const photos = [...draft.photos, event.dataUrl].slice(0, 3);
-    const nextStep: ChatStep = photos.length >= 3 ? "district" : "photo";
+    const nextStep: ChatStep = photos.length >= 3 ? (draft.phone && draft.lat ? "comment" : "district") : "photo";
     return {
       userMessage: user("📷"),
       replies: [
-        bot(photos.length >= 3 ? t(lang, "enoughPhoto") : t(lang, "morePhoto"), {
-          buttons: photos.length >= 3 ? geoKeys(lang) : [[{ id: "photo:skip", label: t(lang, "skipPhoto") }], ...geoKeys(lang)],
-        }),
+        bot(
+          photos.length >= 3
+            ? draft.phone && draft.lat
+              ? t(lang, "commentAsk")
+              : t(lang, "enoughPhoto")
+            : t(lang, "morePhoto"),
+          {
+            buttons:
+              photos.length >= 3
+                ? draft.phone && draft.lat
+                  ? [[{ id: "cmt:skip", label: t(lang, "skipComment") }]]
+                  : geoKeys(lang)
+                : [[{ id: "photo:skip", label: t(lang, "skipPhoto") }], ...(draft.phone && draft.lat ? [] : geoKeys(lang))],
+          },
+        ),
       ],
       step: nextStep,
       draft: { ...draft, photos },
@@ -455,6 +466,15 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (lower === "/start" || tapId === "cmd:start") {
+    const registered = !!(draft.phone && draft.lat && draft.lang);
+    if (registered) {
+      return {
+        userMessage: user("/start"),
+        replies: [bot(t(lang, "welcome"), { buttons: clientMenuKeys(lang) })],
+        step: "category",
+        draft: { ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined, role: "client" },
+      };
+    }
     return {
       userMessage: user("/start"),
       replies: [
@@ -468,7 +488,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         }),
       ],
       step: "lang",
-      draft: { ...emptyDraft(), name: draft.name, lang },
+      draft: { ...emptyDraft(), name: draft.name, lang, phone: draft.phone, lat: draft.lat, lng: draft.lng, districtId: draft.districtId },
     };
   }
 
@@ -642,6 +662,14 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
 
   if (step === "photo") {
     if (tapId === "photo:skip" || lower.includes("пропуст") || lower.includes("fotosiz") || lower.includes("o‘tkaz") || lower.includes("otkaz")) {
+      if (draft.phone && draft.lat && draft.districtId) {
+        return {
+          userMessage: user(t(lang, "skipPhoto")),
+          replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
+          step: "comment",
+          draft,
+        };
+      }
       return {
         userMessage: user(t(lang, "skipPhoto")),
         replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
@@ -770,7 +798,21 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "live") {
-    return { userMessage: user(raw), replies: [bot(t(lang, "live"))], step: "live", draft };
+    const svcLive = tapId.startsWith("svc:") ? serviceById(tapId.slice(4)) : matchService(raw);
+    if (svcLive) {
+      return {
+        userMessage: user(lang === "uz" ? SVC_UZ[svcLive.id] : svcLive.title),
+        replies: [bot(`${lang === "uz" ? SVC_UZ[svcLive.id] : svcLive.title}. ${t(lang, "describe")}`)],
+        step: "problem",
+        draft: { ...draft, serviceId: svcLive.id, photos: [], problem: undefined, comment: undefined, role: "client" },
+      };
+    }
+    return {
+      userMessage: user(raw),
+      replies: [bot(t(lang, "live"), { buttons: clientMenuKeys(lang) })],
+      step: "live",
+      draft,
+    };
   }
 
   if (step === "idle" && draft.role === "master") {

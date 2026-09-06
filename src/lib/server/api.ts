@@ -264,7 +264,8 @@ export const listClients = createServerFn({ method: "GET" })
       from as_clients cl
       left join as_orders o on o.client_id = cl.id
       where cl.user_id = ${uid}
-        and not (cl.name = ${"Удалён"} and cl.telegram_id is null)
+        and cl.name <> ${"Удалён"}
+        and (cl.telegram_id is null or length(cl.telegram_id) >= 8)
       group by cl.id
       order by cl.created_at desc`;
   });
