@@ -17,6 +17,8 @@ type TgMessage = {
   photo?: { file_id: string; file_size?: number }[];
   location?: { latitude: number; longitude: number };
   contact?: { phone_number: string; first_name?: string };
+  forward_from_chat?: { id: number; type?: string; title?: string; username?: string };
+  forward_origin?: { type?: string; chat?: { id: number; type?: string; title?: string; username?: string } };
 };
 type TgUpdate = {
   update_id: number;
@@ -599,104 +601,225 @@ export async function disconnectBotById(sql: Sql, userId: string, botId: number)
 }
 
 function chatTarget(raw: string): string | number {
-  const s = raw.trim();
-  const m = s.match(/-100\d{8,14}/);
-  if (m) return m[0];
+  return normalizeChatId(raw);
+}
+
+/** Unicode minus/dash, 100… without '-', @username, group ids. */
+export function normalizeChatId(raw: string): string {
+  let s = (raw ?? "").trim()
+    .replace(/[\u2212\u2010\u2011\u2012\u2013\u2014\uFE58\uFE63\uFF0D]/g, "-")
+    .replace(/[\u00A0\u202F\s]/g, "")
+    .replace(/[«»“”"'`]/g, "")
+    .replace(/[….]/g, "");
+  const m100 = s.match(/-?100\d{8,14}/);
+  if (m100) {
+    const v = m100[0];
+    return v.startsWith("-") ? v : `-${v}`;
+  }
+  const mNeg = s.match(/-\d{8,14}/);
+  if (mNeg) return mNeg[0];
   if (s.startsWith("@") && s.length > 2) return s;
-  if (/^[A-Za-z][A-Za-z0-9_]{3,}$/.test(s)) return `@${s}`;
-  const n = Number(s);
-  if (Number.isFinite(n) && n !== 0) return n;
+  if (/^[A-Za-z][A-Za-z0-9_]{3,32}$/.test(s)) return `@${s}`;
+  const digits = s.replace(/\D/g, "");
+  if (digits.length >= 8 && digits.startsWith("100")) return `-${digits}`;
   return s;
+}
+
+function isChannelish(raw: string): boolean {
+  const s = normalizeChatId(raw);
+  return s.startsWith("-100") || s.startsWith("@");
+}
+
+function explainAlertError(desc: string): string {
+  const d = desc || "Telegram отклонил сообщение";
+  const low = d.toLowerCase();
+  if (low.includes("chat not found")) {
+    return `${d}. ID неверный или бот не в канале. Добавьте ОСНОВНОГО бота админом канала (право «Публикация сообщений») и перешлите боту любой пост из канала.`;
+  }
+  if (low.includes("not a member") || low.includes("kicked") || low.includes("bot is not a member")) {
+    return `${d}. Бот не состоит в канале. Добавьте его администратором.`;
+  }
+  if (low.includes("not enough rights") || low.includes("write_forbidden") || low.includes("can't send") || low.includes("need administrator") || low.includes("have no rights")) {
+    return `${d}. У бота нет права писать. В канале → администраторы → бот → включите «Публикация сообщений».`;
+  }
+  if (low.includes("unauthorized")) return `${d}. Токен неверный — вставьте токен заново из @BotFather.`;
+  if (low.includes("blocked")) return `${d}. Бот заблокирован.`;
+  return d;
 }
 
 async function collectAlertRoutes(sql: Sql, userId: string) {
   const tokens = new Set<string>();
-  const targets = new Set<string>();
+  const channelTargets = new Set<string>();
+  const dmTargets = new Set<string>();
   try {
     const bots = await sql<{ bot_token: string | null; log_chat_id: string | null }>`
       select bot_token, log_chat_id from as_bots
-      where user_id = ${userId} and kind = ${"logs"} and bot_token is not null
+      where user_id = ${userId} and bot_token is not null
     `;
     for (const b of bots) {
       if (b.bot_token) tokens.add(b.bot_token);
-      if (b.log_chat_id) targets.add(b.log_chat_id.trim());
+      if (b.log_chat_id) {
+        const id = normalizeChatId(b.log_chat_id);
+        if (isChannelish(id)) channelTargets.add(id);
+        else dmTargets.add(id);
+      }
     }
   } catch { /* ignore */ }
   try {
-    const ws = await sql<{ alerts_channel_id: string | null; bot_token: string | null }>`
-      select alerts_channel_id, bot_token from as_workspace where user_id = ${userId}
+    const ws = await sql<{ alerts_channel_id: string | null; bot_token: string | null; channel_username: string | null }>`
+      select alerts_channel_id, bot_token, channel_username from as_workspace where user_id = ${userId}
     `;
-    if (ws[0]?.alerts_channel_id) targets.add(ws[0].alerts_channel_id.trim());
     if (ws[0]?.bot_token) tokens.add(ws[0].bot_token);
+    if (ws[0]?.alerts_channel_id) {
+      const id = normalizeChatId(ws[0].alerts_channel_id);
+      if (isChannelish(id) || id.startsWith("-")) channelTargets.add(id);
+      else if (id) dmTargets.add(id);
+    }
+    if (!channelTargets.size && ws[0]?.channel_username) {
+      const u = ws[0].channel_username.replace(/^@/, "").trim();
+      if (u) channelTargets.add(`@${u}`);
+    }
   } catch { /* ignore */ }
-  return { tokens, targets };
+  return { tokens, channelTargets, dmTargets };
 }
 
 async function sendToAlerts(token: string, chat: string, text: string) {
-  const target = chatTarget(chat);
-  let r = await tg(token, "sendMessage", { chat_id: target, text: text.slice(0, 3500) });
-  if (!r.ok && typeof target === "string" && !String(target).startsWith("-100")) {
-    const looked = await tg(token, "getChat", { chat_id: target.startsWith("@") ? target : `@${target}` });
-    if (looked.ok && looked.result && !Array.isArray(looked.result)) {
-      const id = (looked.result as { id?: number }).id;
-      if (id) r = await tg(token, "sendMessage", { chat_id: id, text: text.slice(0, 3500) });
+  const id = normalizeChatId(chat);
+  const attempts: Array<string | number> = [id];
+  if (/^-?\d+$/.test(id)) {
+    const n = Number(id);
+    if (Number.isSafeInteger(n) && n !== 0) attempts.push(n);
+  }
+  let last: { ok: boolean; description?: string } = { ok: false, description: "не отправлено" };
+  for (const chat_id of attempts) {
+    last = await tg(token, "sendMessage", { chat_id, text: text.slice(0, 3500) });
+    if (last.ok) return last;
+  }
+  const looked = await tg(token, "getChat", { chat_id: id });
+  if (looked.ok && looked.result && !Array.isArray(looked.result)) {
+    const resolved = (looked.result as { id?: number }).id;
+    if (resolved != null) {
+      last = await tg(token, "sendMessage", { chat_id: resolved, text: text.slice(0, 3500) });
+      if (last.ok) return last;
+      last = await tg(token, "sendMessage", { chat_id: String(resolved), text: text.slice(0, 3500) });
+      if (last.ok) return last;
     }
+  } else if (looked.description) {
+    last = { ok: false, description: looked.description };
+  }
+  return last;
+}
+
+async function bindAlertChannel(sql: Sql, uid: string, chatId: string, token: string, title?: string) {
+  const id = normalizeChatId(chatId);
+  try {
+    await sql`update as_workspace set alerts_channel_id = ${id}, last_alert_error = ${null} where user_id = ${uid}`;
+  } catch {
+    try { await sql`update as_workspace set alerts_channel_id = ${id} where user_id = ${uid}`; } catch { /* ignore */ }
+  }
+  try {
+    await sql`update as_bots set log_chat_id = ${id} where user_id = ${uid} and kind = ${"logs"}`;
+  } catch { /* ignore */ }
+  const body = `All Servis: алерты подключены${title ? ` к «${title}»` : ""}. Сюда пойдут заявки, оплаты, назначения.`;
+  const r = await sendToAlerts(token, id, body);
+  if (!r.ok) {
+    const hint = explainAlertError(r.description ?? "");
+    try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${uid}`; } catch { /* ignore */ }
   }
   return r;
 }
 
 export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
-  const { tokens, targets } = await collectAlertRoutes(sql, userId);
-  if (!tokens.size || !targets.size) {
+  const { tokens, channelTargets, dmTargets } = await collectAlertRoutes(sql, userId);
+  if (!tokens.size) {
     try {
-      await sql`update as_workspace set last_alert_error = ${"Нет токена или ID канала. Настройки → токен бота алертов (или основной) + ID канала −100… Бот должен быть админом канала с правом писать."} where user_id = ${userId}`;
-    } catch { /* col may miss */ }
+      await sql`update as_workspace set last_alert_error = ${"Нет токена бота. Настройки → подключите основной бот."} where user_id = ${userId}`;
+    } catch { /* ignore */ }
+    return;
+  }
+  const channelList = [...channelTargets];
+  const dmList = [...dmTargets];
+  if (!channelList.length && !dmList.length) {
+    try {
+      await sql`update as_workspace set last_alert_error = ${"Нет ID канала. Настройки: вставьте −100… ИЛИ перешлите боту пост из канала ИЛИ добавьте основного бота админом канала."} where user_id = ${userId}`;
+    } catch { /* ignore */ }
     return;
   }
   let lastErr = "не отправлено";
-  let ok = false;
+  let channelOk = false;
   for (const token of tokens) {
-    for (const chat of targets) {
+    for (const chat of channelList) {
       try {
         const r = await sendToAlerts(token, chat, text);
-        if (r.ok) { ok = true; lastErr = ""; }
+        if (r.ok) channelOk = true;
         else lastErr = r.description ?? lastErr;
       } catch (e) {
         lastErr = e instanceof Error ? e.message : lastErr;
       }
     }
   }
-  try {
-    await sql`update as_workspace set last_alert_error = ${ok ? null : lastErr} where user_id = ${userId}`;
-  } catch { /* ignore */ }
+  if (channelOk) {
+    try { await sql`update as_workspace set last_alert_error = ${null} where user_id = ${userId}`; } catch { /* ignore */ }
+    return;
+  }
+  let dmOk = false;
+  for (const token of tokens) {
+    for (const chat of dmList) {
+      try {
+        const r = await sendToAlerts(token, chat, text);
+        if (r.ok) dmOk = true;
+        else lastErr = r.description ?? lastErr;
+      } catch (e) {
+        lastErr = e instanceof Error ? e.message : lastErr;
+      }
+    }
+  }
+  const hint = channelList.length
+    ? explainAlertError(lastErr)
+    : (dmOk
+      ? "Алерт ушёл в личку бота, не в канал. Перешлите боту пост из канала или вставьте ID −100… и сделайте бота админом канала."
+      : explainAlertError(lastErr));
+  try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
 }
 
 export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverride?: string) {
-  const { tokens, targets } = await collectAlertRoutes(sql, userId);
-  if (chatOverride?.trim()) targets.add(chatOverride.trim());
-  if (!tokens.size) return { ok: false as const, error: "Нет токена: подключите основной бот или бот алертов." };
-  if (!targets.size) return { ok: false as const, error: "Нет ID канала. Вставьте −100… или добавьте бота админом канала." };
+  if (chatOverride?.trim()) {
+    const id = normalizeChatId(chatOverride);
+    try { await sql`update as_workspace set alerts_channel_id = ${id} where user_id = ${userId}`; } catch { /* ignore */ }
+    try { await sql`update as_bots set log_chat_id = ${id} where user_id = ${userId} and kind = ${"logs"}`; } catch { /* ignore */ }
+  }
+  const { tokens, channelTargets, dmTargets } = await collectAlertRoutes(sql, userId);
+  if (chatOverride?.trim()) {
+    const id = normalizeChatId(chatOverride);
+    if (isChannelish(id) || id.startsWith("-")) channelTargets.add(id);
+  }
+  if (!tokens.size) return { ok: false as const, error: "Нет токена: подключите основной бот (его же добавьте админом канала)." };
+  const channels = [...channelTargets];
+  if (!channels.length) {
+    const hint = "Нет ID канала. Сделайте так: 1) основной бот — админ канала с правом писать 2) перешлите боту любой пост из канала 3) или вставьте ID вида -1001234567890.";
+    try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
+    return { ok: false as const, error: hint };
+  }
+  const text = "All Servis: тест алерта. Если видите это в КАНАЛЕ — подключение работает.";
   let lastErr = "Telegram отклонил сообщение";
   for (const token of tokens) {
-    for (const chat of targets) {
-      const r = await sendToAlerts(token, chat, "All Servis: тест алерта. Если видите это — канал подключён.");
+    for (const chat of channels) {
+      const r = await sendToAlerts(token, chat, text);
       if (r.ok) {
-        try { await sql`update as_workspace set last_alert_error = ${null} where user_id = ${userId}`; } catch { /* ignore */ }
+        try { await sql`update as_workspace set last_alert_error = ${null}, alerts_channel_id = ${normalizeChatId(chat)} where user_id = ${userId}`; } catch { /* ignore */ }
         return { ok: true as const, error: null as string | null };
       }
       lastErr = r.description ?? lastErr;
     }
   }
-  const hint = lastErr.includes("chat not found") || lastErr.includes("not a member") || lastErr.includes("kicked")
-    ? `${lastErr}. Добавьте ЭТОГО бота админом канала (право «Публикация сообщений») и сохраните ID −100…`
-    : lastErr;
+  const hint = explainAlertError(lastErr);
   try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
   return { ok: false as const, error: hint };
 }
 
 export async function sendAlertTest(token: string, chat: string) {
   const json = await sendToAlerts(token, chat, "All Servis: тест алерта. Если видите это — канал подключён.");
-  return { ok: json.ok, error: json.ok ? null : (json.description ?? "Telegram отклонил сообщение") };
+  return { ok: json.ok, error: json.ok ? null : explainAlertError(json.description ?? "Telegram отклонил сообщение") };
 }
 
 export async function disconnectTelegramBot(sql: Sql, userId: string) {
@@ -993,19 +1116,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     const ch = update.my_chat_member.chat;
     const st = update.my_chat_member.new_chat_member?.status ?? "";
     if ((ch.type === "channel" || ch.type === "supergroup") && (st === "administrator" || st === "creator")) {
-      const cid = String(ch.id);
-      if (extra[0]?.kind === "logs") {
-        await sql`update as_bots set log_chat_id = ${cid} where id = ${extra[0].id}`;
-      }
-      try {
-        await sql`update as_workspace set alerts_channel_id = ${cid}, last_alert_error = ${null} where user_id = ${uid}`;
-      } catch {
-        try { await sql`update as_workspace set alerts_channel_id = ${cid} where user_id = ${uid}`; } catch { /* ignore */ }
-      }
-      await tg(token, "sendMessage", {
-        chat_id: ch.id,
-        text: `Алерты All Servis подключены к «${ch.title ?? cid}». Сюда пойдут заявки, оплаты, назначения.`,
-      });
+      await bindAlertChannel(sql, uid, String(ch.id), token, ch.title);
     }
     if (kind === "logs") return { ok: true };
   }
@@ -1014,12 +1125,28 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const chatId = String(msg?.chat.id ?? cb?.message?.chat.id ?? from?.id ?? "");
   if (!chatId || !from) return { ok: true };
 
+  const fwd = msg?.forward_from_chat ?? (msg?.forward_origin?.chat ?? null);
+  if (fwd && (fwd.type === "channel" || fwd.type === "supergroup")) {
+    await bindAlertChannel(sql, uid, String(fwd.id), token, fwd.title);
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: `Канал алертов сохранён (${fwd.title ?? fwd.id}). Проверьте канал — туда ушёл тест. Если пусто: сделайте ЭТОГО бота админом с правом «Публикация сообщений».`,
+    });
+    return { ok: true };
+  }
+
   if (kind === "logs") {
     if (msg?.text === "/start" || msg?.text === "/log") {
-      await sql`update as_bots set log_chat_id = ${chatId} where id = ${extra[0]!.id}`;
+      const cur = extra[0] ? await sql<{ log_chat_id: string | null }>`select log_chat_id from as_bots where id = ${extra[0].id}` : [];
+      const existing = cur[0]?.log_chat_id ?? "";
+      if (!existing || !isChannelish(existing)) {
+        await sql`update as_bots set log_chat_id = ${chatId} where id = ${extra[0]!.id}`;
+      }
       await tg(token, "sendMessage", {
         chat_id: Number(chatId),
-        text: "Личный чат логов привязан. Чтобы слать алерты в закрытый канал: добавьте этого бота админом канала — ID сохранится сам. Либо вставьте ID канала (−100…) в Настройках.",
+        text: existing && isChannelish(existing)
+          ? `Канал уже привязан: ${existing}. Алерты идут туда. Чтобы сменить — перешлите сюда пост из нового канала.`
+          : "Это личка логов. Чтобы алерты шли в КАНАЛ:\n1) Добавьте этого бота админом канала (право «Публикация сообщений»)\n2) Перешлите сюда любой пост из канала — ID сохранится сам\n3) Либо вставьте ID -100… в Настройках админки.",
       });
     }
     return { ok: true };

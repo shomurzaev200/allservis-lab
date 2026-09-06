@@ -5,7 +5,7 @@ import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
 import { addAudit, addEvent, addNote, tickPresence } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
-import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest } from "./telegram";
+import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
 
 async function ctxSql(userId: string) {
@@ -823,8 +823,7 @@ export const saveRequisites = createServerFn({ method: "POST" })
     const channel = (data.channel ?? "").replace(/^@/, "").trim();
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
     const rawAlerts = (data.alertsChannel ?? "").trim();
-    const m = rawAlerts.match(/-100\d{8,14}/);
-    const alerts = m ? m[0] : rawAlerts.replace(/\s+/g, "");
+    const alerts = rawAlerts ? normalizeChatId(rawAlerts) : "";
     await sql`
       update as_workspace set
         channel_username = ${channel || null},
@@ -849,10 +848,11 @@ export const saveRequisites = createServerFn({ method: "POST" })
 
 export const testAlerts = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .handler(async ({ context }) => {
+  .validator((d?: { channel?: string }) => d ?? {})
+  .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    return sendWorkspaceAlertTest(sql, uid);
+    return sendWorkspaceAlertTest(sql, uid, data.channel);
   });
 
 export const listPayments = createServerFn({ method: "GET" })

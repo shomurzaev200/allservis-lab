@@ -71,7 +71,7 @@ function SettingsPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
   });
   const ping = useMutation({
-    mutationFn: () => testAlerts(),
+    mutationFn: () => testAlerts({ data: { channel: alertsChannel } }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["bot-settings"] }),
   });
 
@@ -132,57 +132,60 @@ function SettingsPage() {
       </section>
 
       <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
-        <h2 className="font-medium">Бот алертов + ID канала</h2>
+        <h2 className="font-medium">Алерты в канал</h2>
         <p className="text-sm text-muted">
-          Отдельный бот из BotFather <span className="text-fg">или основной бот</span>. Алерты (заявки, оплаты, онлайн) уходят в канал.
-          Бот <span className="text-fg">обязан быть админом канала</span> с правом «Публикация сообщений».
-          После смены токена нажмите «Проверить алерты».
+          Отдельный бот не обязателен. Добавьте <span className="text-fg">основного бота</span> админом закрытого канала
+          (право «Публикация сообщений»). Самый простой способ привязать канал: перешлите боту любой пост из канала.
         </p>
-        {logBot ? (
-          <div className="rounded-lg bg-ok/10 px-4 py-3 text-sm">
-            <p className="font-medium text-ok">Подключен @{logBot.bot_username}</p>
-            <p className="mt-1 font-mono text-xs text-muted">
-              Канал: {logBot.log_chat_id || data?.alertsChannel || "ещё не задан"}
-            </p>
-            {data?.lastAlertError ? (
-              <p className="mt-2 text-sm text-danger">Последняя ошибка алерта: {data.lastAlertError}</p>
-            ) : (
-              <p className="mt-2 text-xs text-ok">Ошибок отправки нет — если ID канала верный, алерты идут.</p>
-            )}
-            <Button className="mt-3" size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить</Button>
-          </div>
+        {data?.lastAlertError ? (
+          <p className="rounded-lg bg-danger/10 px-4 py-3 text-sm text-danger">Ошибка: {data.lastAlertError}</p>
+        ) : data?.alertsChannel ? (
+          <p className="rounded-lg bg-ok/10 px-4 py-3 text-sm text-ok">Канал привязан: {data.alertsChannel}</p>
         ) : (
-          <p className="rounded-lg bg-warn/10 px-4 py-3 text-sm text-warn">Бот алертов ещё не подключён.</p>
+          <p className="rounded-lg bg-warn/10 px-4 py-3 text-sm text-warn">Канал ещё не привязан — алерты в канал не уходят.</p>
         )}
+        {logBot ? (
+          <p className="text-xs text-muted">Доп. бот алертов: @{logBot.bot_username} · {logBot.log_chat_id || "без чата"}</p>
+        ) : null}
+        <ol className="list-decimal space-y-1 pl-5 text-sm text-muted">
+          <li>Канал → Администраторы → Добавить → ваш основной бот</li>
+          <li>Включите «Публикация сообщений»</li>
+          <li>Перешлите боту пост из канала <span className="text-fg">или</span> вставьте ID ниже</li>
+          <li>Нажмите «Сохранить и проверить»</li>
+        </ol>
         <label className="block text-sm">
-          <span className="text-muted">Токен бота алертов (BotFather)</span>
-          <Input className="mt-1 font-mono" type="password" autoComplete="off" placeholder="123456789:AAHxxxx"
-            value={logToken} onChange={(e) => setLogToken(e.target.value)} />
-        </label>
-        <label className="block text-sm">
-          <span className="text-muted">ID закрытого канала (−100…)</span>
+          <span className="text-muted">ID канала (-100…) или @username</span>
           <Input className="mt-1 font-mono" placeholder="-1001234567890" value={alertsChannel} onChange={(e) => setAlertsChannel(e.target.value)} />
         </label>
         <p className="text-xs text-muted">
-          ID канала: перешлите любое сообщение из канала боту @userinfobot — он покажет id вида -100….
-          Либо просто добавьте бота алертов админом канала — id сохранится сам.
+          ID: перешлите пост из канала боту @userinfobot — строка Chat id вида -100…. Не путайте с личным id.
         </p>
+        {logBot ? (
+          <Button size="sm" variant="outline" onClick={() => remove.mutate(logBot.id)}>Отключить доп. бота алертов</Button>
+        ) : null}
+        <label className="block text-sm">
+          <span className="text-muted">Необязательно: токен отдельного бота алертов</span>
+          <Input className="mt-1 font-mono" type="password" autoComplete="off" placeholder="только если нужен второй бот"
+            value={logToken} onChange={(e) => setLogToken(e.target.value)} />
+        </label>
         {addLogs.data && !addLogs.data.ok ? <p className="text-sm text-danger">{addLogs.data.error}</p> : null}
         {addLogs.data?.ok ? <p className="text-sm text-ok">Бот алертов @{addLogs.data.username} подключён.</p> : null}
-        {reqs.data?.ok ? <p className="text-sm text-ok">Тест ушёл в канал — проверьте Telegram.</p> : null}
+        {reqs.data?.ok ? <p className="text-sm text-ok">Тест ушёл в канал — откройте канал в Telegram.</p> : null}
         {reqs.data && !reqs.data.ok ? <p className="text-sm text-danger">{reqs.data.error}</p> : null}
-        {ping.data?.ok ? <p className="text-sm text-ok">Тест алерта доставлен.</p> : null}
+        {ping.data?.ok ? <p className="text-sm text-ok">Тест доставлен в канал.</p> : null}
         {ping.data && !ping.data.ok ? <p className="text-sm text-danger">{ping.data.error}</p> : null}
         <div className="flex flex-wrap gap-2">
-          <Button disabled={!logToken || addLogs.isPending} onClick={() => addLogs.mutate()}>
-            {addLogs.isPending ? "Подключаю…" : "Подключить бота алертов"}
+          <Button disabled={(!alertsChannel && !logToken) || ping.isPending || reqs.isPending} onClick={() => {
+            if (alertsChannel.trim()) ping.mutate();
+            else reqs.mutate();
+          }}>
+            {ping.isPending ? "Шлю тест…" : "Сохранить и проверить"}
           </Button>
-          <Button variant="outline" disabled={reqs.isPending} onClick={() => reqs.mutate()}>
-            Сохранить ID канала
-          </Button>
-          <Button variant="outline" disabled={ping.isPending} onClick={() => ping.mutate()}>
-            {ping.isPending ? "Шлю…" : "Проверить алерты"}
-          </Button>
+          {logToken ? (
+            <Button variant="outline" disabled={addLogs.isPending} onClick={() => addLogs.mutate()}>
+              {addLogs.isPending ? "Подключаю…" : "Подключить доп. бота"}
+            </Button>
+          ) : null}
         </div>
       </section>
 
