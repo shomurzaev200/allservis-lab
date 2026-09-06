@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "All Servis",
+      "hasCanvas": false,
+      "bodyTextLen": 757,
+      "bodyTextHash": "17ff52e1c1ff7c2dc610b10e6fb719989cb985888f37400cbdc20a1fcf628ac3",
+      "bodyTextPrefix": "All Servis Админка Мастер A All Servis бот · онлайн All Servis B",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "All Servis",
+      "hasCanvas": false,
+      "bodyTextLen": 750,
+      "bodyTextHash": "9146f693e0fffa94ae4687dfbefbe4a21c2a536ca1586f8f92a13e4a9898e30c",
+      "bodyTextPrefix": "All Servis Админка A All Servis бот · онлайн All Servis Bot All ",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/app-builder-preview-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/app-builder-preview.json"
+}

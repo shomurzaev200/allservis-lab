@@ -1,0 +1,36 @@
+{
+  "url": "http://127.0.0.1:8080/login",
+  "viewports": {
+    "desktop": {
+      "width": 1280,
+      "height": 800,
+      "status": 200,
+      "title": "All Servis",
+      "hasCanvas": false,
+      "bodyTextLen": 130,
+      "bodyTextHash": "29649847329ba887ef4da18e14c1870f54961a049cd44d3d635ec9294250a322",
+      "bodyTextPrefix": "ALL SERVIS Вход администратора Только авторизованный оператор ви",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/login.png"
+    },
+    "mobile": {
+      "width": 390,
+      "height": 844,
+      "status": 200,
+      "title": "All Servis",
+      "hasCanvas": false,
+      "bodyTextLen": 130,
+      "bodyTextHash": "29649847329ba887ef4da18e14c1870f54961a049cd44d3d635ec9294250a322",
+      "bodyTextPrefix": "ALL SERVIS Вход администратора Только авторизованный оператор ви",
+      "horizontalOverflow": false,
+      "consoleErrors": [],
+      "pageErrors": [],
+      "screenshot": "/workspace/screenshots/login-mobile.png"
+    }
+  },
+  "brandWarnings": [],
+  "authWarnings": [],
+  "verdictFile": "/workspace/screenshots/login.json"
+}
