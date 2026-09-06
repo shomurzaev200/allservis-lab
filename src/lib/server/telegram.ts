@@ -1,6 +1,6 @@
 import { getSql } from "@/lib/db";
 import { DISTRICTS, districtById, serviceById } from "@/lib/catalog";
-import { clientLabel, type OrderStatus } from "@/lib/domain";
+import { clientLabel, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
 import { emptyDraft, reduceBot, statusReply, clientMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
@@ -87,42 +87,107 @@ function mapsLink(lat?: number | null, lng?: number | null) {
   return `https://maps.google.com/?q=${lat},${lng}`;
 }
 
+function escHtml(s: string) {
+  const amp = String.fromCharCode(38);
+  return s.replaceAll("&", `${amp}amp;`).replaceAll("<", `${amp}lt;`).replaceAll(">", `${amp}gt;`);
+}
+
+const EVENT_HEAD: Record<string, string> = {
+  created: "🆕 Новая заявка",
+  assigned: "📌 Мастер назначен",
+  master_accepted: "✅ Мастер принял заказ",
+  master_rejected: "❌ Мастер отказался — назначьте другого",
+  enroute: "🚗 Мастер выехал к клиенту",
+  arrived: "📍 Мастер на месте",
+  in_progress: "🔧 Работа начата",
+  completed: "✅ Заявка выполнена",
+  cancelled: "🚫 Заявка отменена",
+};
+
+const ORDER_CARD_SQL = `
+  select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.address,
+         o.lat, o.lng, o.comment, o.price, o.master_payout, o.created_at, o.master_id,
+         c.name as client_name, c.telegram_id as client_tg,
+         m.telegram_id as master_tg, m.first_name, m.last_name, m.phone as master_phone,
+         m.rating, m.specialization
+  from as_orders o
+  join as_clients c on c.id = o.client_id
+  left join as_masters m on m.id = o.master_id
+  where o.user_id = $1 and o.id = $2
+`;
+
+function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "channel" | "master" = "channel"): string {
+  const svc = serviceById(String(o.category_slug ?? ""));
+  const distRaw = String(o.district ?? "");
+  const dist = districtById(distRaw)?.title || distRaw || "—";
+  const lat = o.lat == null ? null : Number(o.lat);
+  const lng = o.lng == null ? null : Number(o.lng);
+  const masterName = [o.first_name, o.last_name].filter(Boolean).join(" ").trim();
+  const head = role === "master" ? "🆕 Вам назначен заказ" : (EVENT_HEAD[eventType] || "📋 Заявка");
+  const st = String(o.status ?? eventType);
+  const when = o.created_at
+    ? new Date(String(o.created_at)).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent" })
+    : "";
+  const geoOk = lat != null && lng != null && Number.isFinite(lat) && Number.isFinite(lng);
+  const lines = [
+    `<b>${escHtml(head)} №${escHtml(String(o.public_no))}</b>`,
+    `Статус: ${escHtml(STATUS_LABEL[st as OrderStatus] ?? st)}`,
+    when ? `🕐 ${escHtml(when)}` : "",
+    "",
+    `👤 Клиент: <b>${escHtml(String(o.client_name ?? "—"))}</b>`,
+    o.client_tg ? `📱 Telegram: <code>${escHtml(String(o.client_tg))}</code>` : "",
+    `📞 Телефон: <code>${escHtml(String(o.phone ?? "—"))}</code>`,
+    `🏙 Район: ${escHtml(dist)}`,
+    o.address && String(o.address) && String(o.address) !== distRaw ? `🏠 Адрес: ${escHtml(String(o.address))}` : "",
+    geoOk ? `🗺 Гео: <code>${lat!.toFixed(5)}, ${lng!.toFixed(5)}</code>` : "🗺 Гео: не указано",
+    geoOk ? mapsLink(lat, lng) : "",
+    "",
+    `🛠 Услуга: <b>${escHtml(svc?.title ?? String(o.category_slug ?? "—"))}</b>`,
+    `📝 Проблема: ${escHtml(String(o.description ?? "—"))}`,
+    o.comment ? `💬 Комментарий: ${escHtml(String(o.comment))}` : "",
+    `💰 Сумма: ${Number(o.price ?? 0).toLocaleString("ru-RU")} сум`,
+  ];
+  if (masterName) {
+    lines.push(
+      "",
+      `👷 Мастер: <b>${escHtml(masterName)}</b>`,
+      o.master_phone ? `📞 Мастер: <code>${escHtml(String(o.master_phone))}</code>` : "",
+      o.rating != null ? `⭐ Рейтинг: ${Number(o.rating).toFixed(1)}` : "",
+    );
+  } else if (eventType === "created") {
+    lines.push("", "⏳ Мастер ещё не назначен — откройте заявку в админке.");
+  }
+  return lines.filter((line, i, arr) => line !== "" || arr[i - 1] !== "").join("\n");
+}
+
+async function loadOrderCard(sql: Sql, uid: string, orderId: number) {
+  const rows = await sql.query<Record<string, unknown>>(ORDER_CARD_SQL, [uid, orderId]);
+  return rows[0] ?? null;
+}
+
 async function notifyMasterOfJob(sql: Sql, uid: string, token: string, orderId: number) {
-  const rows = await sql.query<Record<string, unknown>>(
-    `select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.lat, o.lng,
-            o.comment, o.price, o.master_id, c.name as client_name, c.telegram_id as client_tg,
-            m.telegram_id as master_tg, m.first_name, m.last_name, m.phone as master_phone, m.rating, m.specialization
-     from as_orders o
-     join as_clients c on c.id = o.client_id
-     left join as_masters m on m.id = o.master_id
-     where o.user_id = $1 and o.id = $2`,
-    [uid, orderId],
-  );
-  const o = rows[0];
+  const o = await loadOrderCard(sql, uid, orderId);
   if (!o) return;
   const masterTg = o.master_tg ? String(o.master_tg) : "";
   if (!masterTg || !/^\d+$/.test(masterTg)) return;
-  const svc = serviceById(String(o.category_slug ?? ""));
   const lat = o.lat == null ? null : Number(o.lat);
   const lng = o.lng == null ? null : Number(o.lng);
-  const text = [
-    `🆕 Заявка №${o.public_no}`,
-    "",
-    `Клиент: ${o.client_name}`,
-    `Телефон: ${o.phone}`,
-    `Район: ${o.district}`,
-    lat != null && lng != null ? `Гео: ${lat.toFixed(5)}, ${lng.toFixed(5)}` : "",
-    lat != null && lng != null ? mapsLink(lat, lng) : "",
-    `Услуга: ${svc?.title ?? o.category_slug}`,
-    `Задача: ${o.description}`,
-    o.comment ? `Комментарий: ${o.comment}` : "",
-    `Сумма: ${Number(o.price ?? 0).toLocaleString("ru-RU")} сум`,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const text = formatOrderCard(o, "assigned", "master");
   const kb = jobButtons(Number(o.id), String(o.status));
-  await tg(token, "sendMessage", { chat_id: Number(masterTg), text, reply_markup: kb ?? markup(masterMenu("ru", true)) });
-  if (lat != null && lng != null) {
+  const sent = await tg(token, "sendMessage", {
+    chat_id: Number(masterTg),
+    text,
+    parse_mode: "HTML",
+    reply_markup: kb ?? markup(masterMenu("ru", true)),
+  });
+  if (!sent.ok) {
+    await tg(token, "sendMessage", {
+      chat_id: Number(masterTg),
+      text: text.replace(/<[^>]+>/g, ""),
+      reply_markup: kb ?? markup(masterMenu("ru", true)),
+    });
+  }
+  if (lat != null && lng != null && Number.isFinite(lat) && Number.isFinite(lng)) {
     await tg(token, "sendLocation", { chat_id: Number(masterTg), latitude: lat, longitude: lng });
   }
 }
@@ -674,16 +739,24 @@ async function botLabel(token: string) {
 }
 
 async function collectAlertRoutes(sql: Sql, userId: string) {
-  const tokens = new Set<string>();
+  const tokenList: string[] = [];
+  const seen = new Set<string>();
   const channelTargets = new Set<string>();
   const dmTargets = new Set<string>();
+  function addToken(t: string | null | undefined, first = false) {
+    const token = (t ?? "").trim();
+    if (!token || seen.has(token)) return;
+    seen.add(token);
+    if (first) tokenList.unshift(token);
+    else tokenList.push(token);
+  }
   try {
-    const bots = await sql<{ bot_token: string | null; log_chat_id: string | null }>`
-      select bot_token, log_chat_id from as_bots
+    const bots = await sql<{ bot_token: string | null; log_chat_id: string | null; kind: string }>`
+      select bot_token, log_chat_id, kind from as_bots
       where user_id = ${userId} and bot_token is not null
     `;
     for (const b of bots) {
-      if (b.bot_token) tokens.add(b.bot_token);
+      addToken(b.bot_token, b.kind === "logs");
       if (b.log_chat_id) {
         const variants = chatIdVariants(b.log_chat_id);
         for (const id of variants) {
@@ -697,7 +770,7 @@ async function collectAlertRoutes(sql: Sql, userId: string) {
     const ws = await sql<{ alerts_channel_id: string | null; bot_token: string | null; channel_username: string | null }>`
       select alerts_channel_id, bot_token, channel_username from as_workspace where user_id = ${userId}
     `;
-    if (ws[0]?.bot_token) tokens.add(ws[0].bot_token);
+    addToken(ws[0]?.bot_token);
     if (ws[0]?.alerts_channel_id) {
       for (const id of chatIdVariants(ws[0].alerts_channel_id)) {
         if (id.startsWith("-") || id.startsWith("@")) channelTargets.add(id);
@@ -709,21 +782,37 @@ async function collectAlertRoutes(sql: Sql, userId: string) {
       if (u) channelTargets.add(`@${u}`);
     }
   } catch { /* ignore */ }
-  return { tokens, channelTargets, dmTargets };
+  const hasNumeric = [...channelTargets].some((id) => id.startsWith("-"));
+  if (hasNumeric) {
+    for (const id of [...channelTargets]) {
+      if (id.startsWith("@")) channelTargets.delete(id);
+    }
+  }
+  return { tokens: tokenList, channelTargets, dmTargets };
 }
 
-async function sendToAlerts(token: string, chat: string, text: string): Promise<{ ok: boolean; description?: string; used?: string }> {
+async function sendToAlerts(token: string, chat: string, text: string, extra: Record<string, unknown> = {}): Promise<{ ok: boolean; description?: string; used?: string }> {
   const variants = chatIdVariants(chat);
   let last: { ok: boolean; description?: string; used?: string } = { ok: false, description: "не отправлено" };
+  const payload = { text: text.slice(0, 3900), ...extra };
+  const plain = extra.parse_mode ? { text: text.replace(/<[^>]+>/g, "").slice(0, 3900) } : null;
   for (const id of variants) {
-    const r = await tg(token, "sendMessage", { chat_id: id, text: text.slice(0, 3500) });
+    const r = await tg(token, "sendMessage", { chat_id: id, ...payload });
     if (r.ok) return { ok: true, used: id };
+    if (plain) {
+      const rp = await tg(token, "sendMessage", { chat_id: id, ...plain });
+      if (rp.ok) return { ok: true, used: id };
+    }
     last = { ok: false, description: r.description, used: id };
     const looked = await tg(token, "getChat", { chat_id: id });
     if (looked.ok && looked.result && !Array.isArray(looked.result)) {
       const resolved = String((looked.result as { id?: number }).id ?? id);
-      const r2 = await tg(token, "sendMessage", { chat_id: resolved, text: text.slice(0, 3500) });
+      const r2 = await tg(token, "sendMessage", { chat_id: resolved, ...payload });
       if (r2.ok) return { ok: true, used: resolved };
+      if (plain) {
+        const r2p = await tg(token, "sendMessage", { chat_id: resolved, ...plain });
+        if (r2p.ok) return { ok: true, used: resolved };
+      }
       last = { ok: false, description: r2.description ?? looked.description, used: resolved };
     }
   }
@@ -751,9 +840,14 @@ async function bindAlertChannel(sql: Sql, uid: string, chatId: string, token: st
   return r;
 }
 
-export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
+export async function pushWorkspaceLog(
+  sql: Sql,
+  userId: string,
+  text: string,
+  opts?: { parseMode?: "HTML"; lat?: number | null; lng?: number | null },
+) {
   const { tokens, channelTargets, dmTargets } = await collectAlertRoutes(sql, userId);
-  if (!tokens.size) {
+  if (!tokens.length) {
     try {
       await sql`update as_workspace set last_alert_error = ${"Нет токена бота. Настройки → подключите основной бот."} where user_id = ${userId}`;
     } catch { /* ignore */ }
@@ -767,41 +861,62 @@ export async function pushWorkspaceLog(sql: Sql, userId: string, text: string) {
     } catch { /* ignore */ }
     return;
   }
-  let lastErr = "не отправлено";
-  let channelOk = false;
-  for (const token of tokens) {
-    for (const chat of channelList) {
-      try {
-        const r = await sendToAlerts(token, chat, text);
-        if (r.ok) channelOk = true;
-        else lastErr = r.description ?? lastErr;
-      } catch (e) {
-        lastErr = e instanceof Error ? e.message : lastErr;
+  const extra = opts?.parseMode ? { parse_mode: opts.parseMode } : {};
+  const geo = opts?.lat != null && opts?.lng != null && Number.isFinite(opts.lat) && Number.isFinite(opts.lng)
+    ? { lat: opts.lat, lng: opts.lng }
+    : null;
+
+  async function fanout(chats: string[]): Promise<{ ok: boolean; lastErr: string }> {
+    let ok = false;
+    let lastErr = "не отправлено";
+    for (const chat of chats) {
+      for (const token of tokens) {
+        try {
+          const r = await sendToAlerts(token, chat, text, extra);
+          if (r.ok) {
+            ok = true;
+            if (geo) {
+              await tg(token, "sendLocation", { chat_id: r.used ?? chat, latitude: geo.lat, longitude: geo.lng });
+            }
+            break;
+          }
+          lastErr = r.description ?? lastErr;
+        } catch (e) {
+          lastErr = e instanceof Error ? e.message : lastErr;
+        }
       }
     }
+    return { ok, lastErr };
   }
-  if (channelOk) {
+
+  let lastErr = "не отправлено";
+  const channel = await fanout(channelList);
+  if (channel.ok) {
     try { await sql`update as_workspace set last_alert_error = ${null} where user_id = ${userId}`; } catch { /* ignore */ }
     return;
   }
-  let dmOk = false;
-  for (const token of tokens) {
-    for (const chat of dmList) {
-      try {
-        const r = await sendToAlerts(token, chat, text);
-        if (r.ok) dmOk = true;
-        else lastErr = r.description ?? lastErr;
-      } catch (e) {
-        lastErr = e instanceof Error ? e.message : lastErr;
-      }
-    }
-  }
+  lastErr = channel.lastErr;
+  const dm = await fanout(dmList);
+  if (dm.ok) lastErr = dm.lastErr;
   const hint = channelList.length
     ? explainAlertError(lastErr)
-    : (dmOk
+    : (dm.ok
       ? "Алерт ушёл в личку бота, не в канал. Перешлите боту пост из канала или вставьте ID −100… и сделайте бота админом канала."
-      : explainAlertError(lastErr));
+      : explainAlertError(dm.lastErr || lastErr));
   try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
+}
+
+export async function pushOrderChannelAlert(sql: Sql, userId: string, orderId: number, eventType: string) {
+  const o = await loadOrderCard(sql, userId, orderId);
+  if (!o) return;
+  const lat = o.lat == null ? null : Number(o.lat);
+  const lng = o.lng == null ? null : Number(o.lng);
+  const withGeo = eventType === "created" || eventType === "assigned";
+  await pushWorkspaceLog(sql, userId, formatOrderCard(o, eventType, "channel"), {
+    parseMode: "HTML",
+    lat: withGeo ? lat : null,
+    lng: withGeo ? lng : null,
+  });
 }
 
 export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverride?: string) {
@@ -824,7 +939,7 @@ export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverr
       if (id.startsWith("-") || id.startsWith("@")) channelTargets.add(id);
     }
   }
-  if (!tokens.size) return { ok: false as const, error: "Нет токена: подключите основной бот и добавьте ИМЕННО ЕГО админом канала." };
+  if (!tokens.length) return { ok: false as const, error: "Нет токена: подключите основной бот и добавьте ИМЕННО ЕГО админом канала." };
   const channels = [...channelTargets];
   if (!channels.length) {
     const hint = "Нет ID канала. Не копируйте свой личный id. Откройте канал → поделитесь ссылкой t.me/c/… ИЛИ напишите любой пост в канал после того как бот стал админом ИЛИ перешлите пост боту.";
@@ -982,7 +1097,18 @@ async function gated(
       text: "Скрин получил. Администратор проверит оплату. Как подтвердит — бот откроется.",
     });
     try {
-      await pushWorkspaceLog(sql, uid, `💳 Скрин оплаты от ${name} (${chatId}). Сумма ${amount.toLocaleString("ru-RU")} сум.`);
+      await pushWorkspaceLog(
+        sql,
+        uid,
+        [
+          "<b>💳 Скрин оплаты</b>",
+          `👤 Клиент: <b>${escHtml(name)}</b>`,
+          `📱 Telegram: <code>${escHtml(chatId)}</code>`,
+          `💰 Сумма: ${amount.toLocaleString("ru-RU")} сум`,
+          "Откройте админку → Пополнения.",
+        ].join("\n"),
+        { parseMode: "HTML" },
+      );
     } catch { /* ignore */ }
     return true;
   }
@@ -1124,7 +1250,18 @@ async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: 
     `;
   }
   try {
-    await pushWorkspaceLog(sql, uid, `🛠 Новый мастер из бота: ${name} · ${spec} · ${phone} · ${dist}`);
+    await pushWorkspaceLog(
+      sql,
+      uid,
+      [
+        "<b>🛠 Новый мастер в боте</b>",
+        `👤 <b>${escHtml(name)}</b>`,
+        `🛠 ${escHtml(serviceById(spec)?.title ?? spec)}`,
+        phone ? `📞 <code>${escHtml(phone)}</code>` : "",
+        dist ? `🏙 ${escHtml(dist)}` : "",
+      ].filter(Boolean).join("\n"),
+      { parseMode: "HTML" },
+    );
   } catch { /* ignore */ }
 }
 
@@ -1280,7 +1417,17 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 
   if (tapGuess === "cmd:support") {
     try {
-      await pushWorkspaceLog(sql, uid, `📞 Клиент ${name} (${chatId}) просит оператора.`);
+      await pushWorkspaceLog(
+        sql,
+        uid,
+        [
+          "<b>📞 Клиент просит оператора</b>",
+          `👤 <b>${escHtml(name)}</b>`,
+          `📱 Telegram: <code>${escHtml(chatId)}</code>`,
+          "Напишите ему в боте или позвоните.",
+        ].join("\n"),
+        { parseMode: "HTML" },
+      );
     } catch { /* ignore */ }
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
@@ -1364,7 +1511,12 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       where user_id = ${uid} and telegram_id = ${chatId} and online_status <> 'blocked'
     `;
     try {
-      await pushWorkspaceLog(sql, uid, `${result.setOnline ? "🟢" : "⚪️"} Мастер ${name} ${result.setOnline ? "онлайн" : "офлайн"}`);
+      await pushWorkspaceLog(
+        sql,
+        uid,
+        `${result.setOnline ? "🟢" : "⚪️"} Мастер <b>${escHtml(name)}</b> ${result.setOnline ? "на линии" : "офлайн"}`,
+        { parseMode: "HTML" },
+      );
     } catch { /* ignore */ }
   }
 

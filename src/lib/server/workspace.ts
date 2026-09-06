@@ -86,7 +86,7 @@ export async function addEvent(sql: Sql, userId: string, orderId: number, eventT
     insert into as_order_events (user_id, order_id, event_type, actor, metadata)
     values (${userId}, ${orderId}, ${eventType}, ${actor}, ${JSON.stringify(metadata)})
   `;
-  void pushLog(sql, userId, `📋 Заявка #${orderId}: ${eventType} (${actor})`);
+  void pushOrderAlert(sql, userId, orderId, eventType);
 }
 
 export async function addAudit(sql: Sql, userId: string, action: string, objectType: string, objectId: string, oldValue: string | null, newValue: string | null) {
@@ -94,7 +94,6 @@ export async function addAudit(sql: Sql, userId: string, action: string, objectT
     insert into as_audit (user_id, action, object_type, object_id, old_value, new_value)
     values (${userId}, ${action}, ${objectType}, ${objectId}, ${oldValue}, ${newValue})
   `;
-  void pushLog(sql, userId, `🛡 ${action} · ${objectType} #${objectId}${newValue ? ` → ${newValue}` : ""}`);
 }
 
 export async function addNote(sql: Sql, userId: string, kind: string, title: string, body: string, orderId: number | null, masterId: number | null) {
@@ -102,15 +101,14 @@ export async function addNote(sql: Sql, userId: string, kind: string, title: str
     insert into as_notifications (user_id, kind, title, body, order_id, master_id)
     values (${userId}, ${kind}, ${title}, ${body}, ${orderId}, ${masterId})
   `;
-  await pushLog(sql, userId, `🔔 ${title}\n${body}`);
 }
 
-async function pushLog(sql: Sql, userId: string, text: string) {
+async function pushOrderAlert(sql: Sql, userId: string, orderId: number, eventType: string) {
   try {
-    const { pushWorkspaceLog } = await import("./telegram");
-    await pushWorkspaceLog(sql, userId, text);
+    const { pushOrderChannelAlert } = await import("./telegram");
+    await pushOrderChannelAlert(sql, userId, orderId, eventType);
   } catch {
-    /* logs bot optional */
+    /* alerts optional */
   }
 }
 
