@@ -5,6 +5,7 @@ import { OnlineDot, OrderBadge } from "@/components/admin/status-badge";
 import { serviceById } from "@/lib/catalog";
 import { formatSum } from "@/lib/domain";
 import { Button } from "@/components/ui/button";
+import { useAccess } from "@/components/admin/access";
 
 export const Route = createFileRoute("/admin/masters/$id")({ component: MasterCard });
 
@@ -12,6 +13,8 @@ function MasterCard() {
   const { id } = Route.useParams();
   const nav = useNavigate();
   const qc = useQueryClient();
+  const access = useAccess();
+  const canDelete = access.allowed("delete");
   const { data, isPending } = useQuery({ queryKey: ["master", id], queryFn: () => getMaster({ data: Number(id) }) });
   const block = useMutation({
     mutationFn: (blocked: boolean) => setMasterBlocked({ data: { id: Number(id), blocked } }),
@@ -38,11 +41,14 @@ function MasterCard() {
         </div>
         <OnlineDot status={m.online_status} />
       </div>
-      <div className="flex flex-wrap gap-2">
-        <Button variant="outline" onClick={() => block.mutate(!blocked)}>{blocked ? "Разблокировать" : "Заблокировать"}</Button>
-        <Button variant="outline" onClick={() => remove.mutate()}>Удалить мастера</Button>
-      </div>
+      {canDelete ? (
+        <div className="flex flex-wrap gap-2">
+          <Button variant="outline" onClick={() => block.mutate(!blocked)}>{blocked ? "Разблокировать" : "Заблокировать"}</Button>
+          <Button variant="outline" onClick={() => remove.mutate()}>Удалить мастера</Button>
+        </div>
+      ) : null}
       {remove.data && !remove.data.ok ? <p className="text-sm text-danger">{remove.data.error}</p> : null}
+      {block.data && !block.data.ok ? <p className="text-sm text-danger">{block.data.error}</p> : null}
       <div className="grid gap-3 sm:grid-cols-4">
         {[["Рейтинг", m.rating.toFixed(2)], ["Завершено", m.completed_orders], ["Принятие", `${rate}%`], ["Заработок", formatSum(m.earnings)]].map(([k, v]) => (
           <div key={k} className="glass-card rounded-xl p-3"><p className="text-xs text-muted">{k}</p><p className="mt-1 font-mono text-lg">{v}</p></div>

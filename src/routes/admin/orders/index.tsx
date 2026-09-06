@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cancelOrder, listOrders } from "@/lib/server/api";
 import { OrderBadge } from "@/components/admin/status-badge";
 import { AssignDialog } from "@/components/admin/assign-dialog";
+import { useAccess } from "@/components/admin/access";
 import { ORDER_STATUSES, STATUS_LABEL } from "@/lib/domain";
 import { serviceById } from "@/lib/catalog";
 import { Button } from "@/components/ui/button";
@@ -25,6 +26,8 @@ function OrdersPage() {
   const [q, setQ] = useState(search.q ?? "");
   const [assign, setAssign] = useState<{ id: number; no: number; name: string } | null>(null);
   const qc = useQueryClient();
+  const access = useAccess();
+  const canAssign = access.allowed("assign");
   const { data = [], isPending } = useQuery({
     queryKey: ["orders", status, q],
     queryFn: () => listOrders({ data: { status, q } }),
@@ -48,6 +51,9 @@ function OrdersPage() {
           className="max-w-xs"
         />
       </div>
+      {cancel.data && "error" in cancel.data && cancel.data.error ? (
+        <p className="text-sm text-warn">{String(cancel.data.error)}</p>
+      ) : null}
       <div className="flex flex-wrap gap-2">
         <FilterChip id="all" label="Все" cur={status} set={setStatus} />
         <FilterChip id="waiting" label="Ожидают" cur={status} set={setStatus} />
@@ -105,12 +111,12 @@ function OrdersPage() {
                         Карточка
                       </Link>
                     </Button>
-                    {o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned" ? (
+                    {canAssign && (o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned") ? (
                       <Button size="sm" onClick={() => setAssign({ id: o.id, no: o.public_no, name: o.client_name })}>
                         Назначить
                       </Button>
                     ) : null}
-                    {o.status !== "completed" && o.status !== "cancelled" ? (
+                    {canAssign && o.status !== "completed" && o.status !== "cancelled" ? (
                       <Button size="sm" variant="outline" onClick={() => cancel.mutate(o.id)}>
                         Отмена
                       </Button>
@@ -122,7 +128,7 @@ function OrdersPage() {
           </tbody>
         </table>
       </div>
-      {assign ? (
+      {assign && canAssign ? (
         <AssignDialog
           orderId={assign.id}
           publicNo={assign.no}

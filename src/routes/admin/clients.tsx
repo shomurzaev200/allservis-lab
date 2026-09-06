@@ -4,11 +4,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { deleteClient, listClients, setClientBlocked } from "@/lib/server/api";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { useAccess } from "@/components/admin/access";
 
 export const Route = createFileRoute("/admin/clients")({ component: ClientsPage });
 
 function ClientsPage() {
   const qc = useQueryClient();
+  const access = useAccess();
+  const canDelete = access.allowed("delete");
   const { data = [], isPending } = useQuery({ queryKey: ["clients"], queryFn: () => listClients() });
   const [q, setQ] = useState("");
   const block = useMutation({
@@ -32,6 +35,7 @@ function ClientsPage() {
         <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Поиск" className="max-w-xs" />
       </div>
       {remove.data && !remove.data.ok ? <p className="text-sm text-warn">{remove.data.error}</p> : null}
+      {block.data && !block.data.ok ? <p className="text-sm text-warn">{block.data.error}</p> : null}
       <div className="overflow-x-auto rounded-xl border border-border">
         <table className="w-full min-w-[64rem] text-left text-sm">
           <thead className="bg-surface-2 text-xs uppercase text-muted">
@@ -44,7 +48,7 @@ function ClientsPage() {
               <th className="px-3 py-3">Роль</th>
               <th className="px-3 py-3">Заказы</th>
               <th className="px-3 py-3">Статус</th>
-              <th className="px-3 py-3" />
+              {canDelete ? <th className="px-3 py-3" /> : null}
             </tr>
           </thead>
           <tbody>
@@ -64,14 +68,16 @@ function ClientsPage() {
                 <td className="px-3 py-3">{c.role === "master" ? "мастер" : "клиент"}</td>
                 <td className="px-3 py-3">{c.orders_count}</td>
                 <td className="px-3 py-3">{c.blocked ? <span className="text-danger">блок</span> : <span className="text-ok">ок</span>}</td>
-                <td className="px-3 py-3">
-                  <div className="flex flex-wrap gap-2">
-                    <Button size="sm" variant="outline" onClick={() => block.mutate({ id: c.id, blocked: !c.blocked })}>
-                      {c.blocked ? "Разблок" : "Блок"}
-                    </Button>
-                    <Button size="sm" variant="outline" onClick={() => remove.mutate(c.id)}>Удалить</Button>
-                  </div>
-                </td>
+                {canDelete ? (
+                  <td className="px-3 py-3">
+                    <div className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" onClick={() => block.mutate({ id: c.id, blocked: !c.blocked })}>
+                        {c.blocked ? "Разблок" : "Блок"}
+                      </Button>
+                      <Button size="sm" variant="outline" onClick={() => remove.mutate(c.id)}>Удалить</Button>
+                    </div>
+                  </td>
+                ) : null}
               </tr>
             ))}
           </tbody>

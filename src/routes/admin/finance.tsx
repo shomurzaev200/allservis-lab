@@ -2,10 +2,19 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { getDashboard, listMasters } from "@/lib/server/api";
 import { formatSum } from "@/lib/domain";
+import { NeedPerm } from "@/components/admin/access";
 
 export const Route = createFileRoute("/admin/finance")({ component: FinancePage });
 
 function FinancePage() {
+  return (
+    <NeedPerm perm="finance">
+      <FinanceInner />
+    </NeedPerm>
+  );
+}
+
+function FinanceInner() {
   const dash = useQuery({ queryKey: ["dashboard"], queryFn: () => getDashboard() });
   const masters = useQuery({ queryKey: ["masters"], queryFn: () => listMasters() });
   const f = dash.data?.finance;
@@ -42,7 +51,7 @@ function Card({ k, v }: { k: string; v: string }) {
   return (
     <div className="glass-card rounded-xl p-4">
       <p className="text-xs text-muted">{k}</p>
-      <p className="mt-2 font-display text-xl">{v}</p>
+      <p className="mt-1 font-mono text-xl text-accent">{v}</p>
     </div>
   );
 }

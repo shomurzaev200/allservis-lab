@@ -20,7 +20,7 @@ function Login() {
   const [busy, setBusy] = useState<"in" | "up" | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  if (!isPending && user) return <Navigate to="/admin/settings" />;
+  if (!isPending && user) return <Navigate to="/admin" />;
 
   async function submit(mode: "in" | "up", e: FormEvent) {
     e.preventDefault();
@@ -43,7 +43,7 @@ function Login() {
         if (err) throw new Error(authErrorText(err, "Неверный email или пароль"));
         if (data?.token) persistSessionToken(data.token);
       }
-      window.location.assign("/admin/settings");
+      window.location.assign("/admin");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Ошибка входа");
     } finally {
@@ -57,7 +57,8 @@ function Login() {
         <p className="font-display text-xs tracking-[0.2em] text-accent">ALL SERVIS</p>
         <h1 className="font-display text-2xl font-medium">Вход администратора</h1>
         <p className="text-sm text-muted">
-          Первый владелец — «Создать аккаунт». Остальных добавляет владелец в Команде (логин + пароль).
+          Первый владелец — «Создать аккаунт». Остальных добавляет только владелец в Команде (email + пароль).
+          Если владелец уже есть, «Создать аккаунт» не даст прав в админку.
         </p>
 
         {authEnabled ? (

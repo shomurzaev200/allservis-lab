@@ -1,29 +1,34 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { deleteStaff, getAccess, inviteStaff, listStaff, setStaffBlocked, setStaffPerms } from "@/lib/server/api";
+import { deleteStaff, inviteStaff, listStaff, setStaffBlocked, setStaffPerms } from "@/lib/server/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAccess } from "@/components/admin/access";
 
 export const Route = createFileRoute("/admin/team")({ component: TeamPage });
 
 function TeamPage() {
   const qc = useQueryClient();
-  const { data: access } = useQuery({ queryKey: ["access"], queryFn: () => getAccess() });
+  const access = useAccess();
   const { data = [], isPending } = useQuery({ queryKey: ["staff"], queryFn: () => listStaff() });
   const [email, setEmail] = useState("");
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [invite, setInvite] = useState(false);
-  const [del, setDel] = useState(true);
-  const [assign, setAssign] = useState(true);
+  const [del, setDel] = useState(false);
+  const [assign, setAssign] = useState(false);
   const [finance, setFinance] = useState(false);
   const [bots, setBots] = useState(false);
   const add = useMutation({
     mutationFn: () => inviteStaff({
       data: { email, name, password, can_invite: invite, can_delete: del, can_assign: assign, can_finance: finance, can_bots: bots },
     }),
-    onSuccess: () => { void qc.invalidateQueries({ queryKey: ["staff"] }); setEmail(""); setName(""); setPassword(""); },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ["staff"] });
+      setEmail(""); setName(""); setPassword("");
+      setInvite(false); setDel(false); setAssign(false); setFinance(false); setBots(false);
+    },
   });
   const block = useMutation({
     mutationFn: (p: { id: number; blocked: boolean }) => setStaffBlocked({ data: p }),
@@ -38,8 +43,12 @@ function TeamPage() {
       setStaffPerms({ data: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["staff"] }),
   });
-  const owner = access?.role === "owner";
-  const canInvite = owner || Boolean(access?.perms?.invite);
+  const owner = access.owner;
+  const canInvite = owner || access.allowed("invite");
+
+  if (!access.isPending && !canInvite) {
+    return <p className="p-6 text-sm text-warn">Нет права. Команду видит владелец или сотрудник с правом «приглашать».</p>;
+  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-6 p-4 md:p-6">
@@ -47,8 +56,8 @@ function TeamPage() {
         <p className="text-xs uppercase tracking-wider text-accent">Доступ</p>
         <h1 className="font-display text-2xl">Команда</h1>
         <p className="mt-2 text-sm text-muted">
-          Только владелец добавляет людей, пока не выдаст право «приглашать». Логин = email, пароль задаёте вы.
-          Вы: {access?.email ?? "…"} · {owner ? "владелец" : "админ"}
+          Только владелец выдаёт права. Пустая галочка = запрет: кнопки скрыты, сервер отклонит действие.
+          Вы: {access.data?.email ?? "…"} · {owner ? "владелец" : "админ"}
         </p>
       </div>
 
@@ -58,19 +67,18 @@ function TeamPage() {
           <Input type="email" placeholder="email@компания.uz" value={email} onChange={(e) => setEmail(e.target.value)} />
           <Input placeholder="Имя" value={name} onChange={(e) => setName(e.target.value)} />
           <Input type="password" placeholder="Пароль (мин. 8 символов)" value={password} onChange={(e) => setPassword(e.target.value)} autoComplete="new-password" />
-          <div className="grid gap-2 text-sm sm:grid-cols-2">
-            {owner ? (
+          {owner ? (
+            <div className="grid gap-2 text-sm sm:grid-cols-2">
               <label className="flex items-center gap-2"><input type="checkbox" checked={invite} onChange={(e) => setInvite(e.target.checked)} />Может приглашать других</label>
-            ) : null}
-            <label className="flex items-center gap-2"><input type="checkbox" checked={del} onChange={(e) => setDel(e.target.checked)} />Удалять клиентов/мастеров</label>
-            <label className="flex items-center gap-2"><input type="checkbox" checked={assign} onChange={(e) => setAssign(e.target.checked)} />Назначать мастеров</label>
-            {owner ? (
+              <label className="flex items-center gap-2"><input type="checkbox" checked={del} onChange={(e) => setDel(e.target.checked)} />Удалять / блокировать клиентов и мастеров</label>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={assign} onChange={(e) => setAssign(e.target.checked)} />Назначать мастеров и отменять заявки</label>
               <label className="flex items-center gap-2"><input type="checkbox" checked={finance} onChange={(e) => setFinance(e.target.checked)} />Финансы / пополнения</label>
-            ) : null}
-            {owner ? (
-              <label className="flex items-center gap-2"><input type="checkbox" checked={bots} onChange={(e) => setBots(e.target.checked)} />Боты и настройки</label>
-            ) : null}
-          </div>
+              <label className="flex items-center gap-2"><input type="checkbox" checked={bots} onChange={(e) => setBots(e.target.checked)} />Боты, настройки, рекламные ссылки</label>
+            </div>
+          ) : (
+            <p className="text-sm text-muted">Новый сотрудник войдёт без доп. прав. Права выдаёт только владелец.</p>
+          )}
+          <p className="text-xs text-subtle">По умолчанию все галочки сняты. Неотмеченное сделать нельзя — ни через меню, ни зная адрес страницы.</p>
           <Button disabled={!email || password.length < 8 || add.isPending} onClick={() => add.mutate()}>
             {add.isPending ? "Добавляю…" : "Выдать доступ"}
           </Button>
@@ -112,14 +120,14 @@ function TeamPage() {
                         <label key={key} className="flex items-center gap-2">
                           <input
                             type="checkbox"
-                            checked={on}
+                            checked={Boolean(on)}
                             onChange={() => perms.mutate({
                               id: s.id,
-                              can_invite: key === "can_invite" ? !s.can_invite : s.can_invite,
-                              can_delete: key === "can_delete" ? !s.can_delete : s.can_delete,
-                              can_assign: key === "can_assign" ? !s.can_assign : s.can_assign,
-                              can_finance: key === "can_finance" ? !s.can_finance : s.can_finance,
-                              can_bots: key === "can_bots" ? !s.can_bots : s.can_bots,
+                              can_invite: key === "can_invite" ? !s.can_invite : Boolean(s.can_invite),
+                              can_delete: key === "can_delete" ? !s.can_delete : Boolean(s.can_delete),
+                              can_assign: key === "can_assign" ? !s.can_assign : Boolean(s.can_assign),
+                              can_finance: key === "can_finance" ? !s.can_finance : Boolean(s.can_finance),
+                              can_bots: key === "can_bots" ? !s.can_bots : Boolean(s.can_bots),
                             })}
                           />
                           {label}
@@ -128,11 +136,13 @@ function TeamPage() {
                     </div>
                   ) : (
                     <span className="text-muted">
-                      {s.can_invite ? "приглашать " : ""}
-                      {s.can_delete ? "удалять " : ""}
-                      {s.can_assign ? "назначать " : ""}
-                      {s.can_finance ? "финансы " : ""}
-                      {s.can_bots ? "боты" : ""}
+                      {[
+                        s.can_invite ? "приглашать" : null,
+                        s.can_delete ? "удалять" : null,
+                        s.can_assign ? "назначать" : null,
+                        s.can_finance ? "финансы" : null,
+                        s.can_bots ? "боты" : null,
+                      ].filter(Boolean).join(" · ") || "без доп. прав"}
                     </span>
                   )}
                 </td>

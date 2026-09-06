@@ -4,12 +4,15 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createRefLink, listRefLinks } from "@/lib/server/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { useAccess } from "@/components/admin/access";
 
 export const Route = createFileRoute("/admin/refs")({ component: RefsPage });
 
 function RefsPage() {
   const qc = useQueryClient();
   const { data, isPending } = useQuery({ queryKey: ["refs"], queryFn: () => listRefLinks() });
+  const access = useAccess();
+  const canBots = access.allowed("bots");
   const [label, setLabel] = useState("");
   const [source, setSource] = useState("instagram");
   const [copied, setCopied] = useState("");
@@ -36,6 +39,7 @@ function RefsPage() {
         </p>
       </div>
 
+      {canBots ? (
       <section className="glass-card space-y-3 rounded-xl p-5">
         <h2 className="font-medium">Новая рекламная ссылка</h2>
         <div className="flex flex-col gap-2 sm:flex-row">
@@ -65,6 +69,9 @@ function RefsPage() {
         {create.data && !create.data.ok ? <p className="text-sm text-danger">{create.data.error}</p> : null}
         {!username ? <p className="text-sm text-warn">Сначала подключите основного бота — тогда ссылки станут t.me/…</p> : null}
       </section>
+      ) : (
+        <p className="rounded-lg bg-warn/10 px-4 py-3 text-sm text-warn">Создавать рекламные ссылки может владелец или сотрудник с правом «боты».</p>
+      )}
 
       <section>
         <h2 className="mb-2 text-sm text-muted">Откуда приходят</h2>

@@ -44,6 +44,12 @@ function n(v: unknown): number {
   return Number.isFinite(x) ? x : 0;
 }
 
+function asBool(v: unknown): boolean {
+  return v === true || v === "t" || v === "true" || v === 1 || v === "1";
+}
+
+const NO_PERM = "Нет права. Владелец не выдал это в «Команда».";
+
 async function ensureCredentialUser(
   sql: Awaited<ReturnType<typeof getSql>>,
   email: string,
@@ -346,7 +352,7 @@ export const assignMaster = createServerFn({ method: "POST" })
   .validator((d: { orderId: number; masterId: number }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
-    if (!can(actor, "assign")) return { success: false as const, error: "Нет права назначать мастеров" };
+    if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
     if (!order) return { success: false as const, error: "ORDER_NOT_FOUND" };
@@ -370,6 +376,7 @@ export const cancelOrder = createServerFn({ method: "POST" })
   .validator((orderId: number) => orderId)
   .handler(async ({ context, data: orderId }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
     await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now() where user_id = ${uid} and id = ${orderId} and status <> 'completed'`;
     await addEvent(sql, uid, orderId, "cancelled", "admin", {});
     await pushOrderStatus(sql, uid, orderId, "cancelled", null);
@@ -381,6 +388,7 @@ export const masterDecision = createServerFn({ method: "POST" })
   .validator((d: { orderId: number; accept: boolean; masterId: number }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
     if (!order) return { success: false as const, error: "ORDER_NOT_FOUND" };
@@ -406,6 +414,7 @@ export const masterAdvance = createServerFn({ method: "POST" })
   .validator((d: { orderId: number; masterId: number; to: OrderStatus }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
     const allowed: Record<string, OrderStatus> = { master_accepted: "enroute", enroute: "arrived", arrived: "in_progress", in_progress: "completed" };
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
@@ -550,21 +559,22 @@ export const getBotSettings = createServerFn({ method: "GET" })
       w = row[0];
     }
     const token = w?.bot_token ?? "";
-    const masked = token ? `${token.slice(0, 8)}…${token.slice(-4)}` : null;
+    const canBots = can(actor, "bots");
+    const masked = canBots && token ? `${token.slice(0, 8)}…${token.slice(-4)}` : null;
     return {
       connected: Boolean(w?.bot_username),
       username: w?.bot_username ?? null,
-      webhookId: w?.webhook_id ?? null,
+      webhookId: canBots ? (w?.webhook_id ?? null) : null,
       connectedAt: w?.bot_connected_at ?? null,
       tokenMasked: masked,
       pollMode: Boolean(w?.poll_mode),
       channel: w?.channel_username ?? "",
-      payCard: w?.pay_card ?? "",
-      payBank: w?.pay_bank ?? "",
-      payHolder: w?.pay_holder ?? "",
+      payCard: canBots ? (w?.pay_card ?? "") : "",
+      payBank: canBots ? (w?.pay_bank ?? "") : "",
+      payHolder: canBots ? (w?.pay_holder ?? "") : "",
       payAmount: n(w?.pay_amount),
-      alertsChannel: w?.alerts_channel_id ?? "",
-      lastAlertError: w?.last_alert_error ?? "",
+      alertsChannel: canBots ? (w?.alerts_channel_id ?? "") : "",
+      lastAlertError: canBots ? (w?.last_alert_error ?? "") : "",
       role: actor.role,
       email: actor.email,
     };
@@ -575,7 +585,7 @@ export const saveBotToken = createServerFn({ method: "POST" })
   .validator((d: { token: string; publicOrigin: string }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
-    if (!can(actor, "bots")) return { ok: false as const, error: "Нет права подключать ботов", username: null as string | null, mode: null as string | null };
+    if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM, username: null as string | null, mode: null as string | null };
     return connectTelegramBot(sql, uid, data.token.trim(), data.publicOrigin.replace(/\/$/, ""));
   });
 
@@ -583,15 +593,42 @@ export const dropBotToken = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
+    requireAdmin(actor);
+    if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM };
     await disconnectTelegramBot(sql, uid);
-    return { ok: true };
+    return { ok: true as const, error: null as string | null };
   });
 
 export const getAccess = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
-    const { actor } = await ctxSql(context.userId);
-    return { role: actor.role, email: actor.email, name: actor.name, workspaceId: actor.workspaceId, perms: actor.perms };
+    const emptyPerms = { invite: false, delete: false, assign: false, finance: false, bots: false };
+    try {
+      const { actor } = await ctxSql(context.userId);
+      return {
+        ok: true as const,
+        error: null as string | null,
+        role: actor.role as "owner" | "admin",
+        email: actor.email,
+        name: actor.name,
+        workspaceId: actor.workspaceId,
+        perms: actor.perms,
+      };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "ERROR";
+      if (msg === "NOT_INVITED" || msg === "BLOCKED") {
+        return {
+          ok: false as const,
+          error: msg,
+          role: null as "owner" | "admin" | null,
+          email: "",
+          name: "",
+          workspaceId: "",
+          perms: emptyPerms,
+        };
+      }
+      throw e;
+    }
   });
 
 export const listStaff = createServerFn({ method: "GET" })
@@ -599,23 +636,31 @@ export const listStaff = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { sql, uid } = await ctxSql(context.userId);
     try {
-      return await sql<{
+      const rows = await sql<{
         id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
         can_invite: boolean; can_delete: boolean; can_assign: boolean; can_finance: boolean; can_bots: boolean;
       }>`
         select id, user_id, email, name, role, blocked, created_at,
           coalesce(can_invite, false) as can_invite,
-          coalesce(can_delete, true) as can_delete,
-          coalesce(can_assign, true) as can_assign,
+          coalesce(can_delete, false) as can_delete,
+          coalesce(can_assign, false) as can_assign,
           coalesce(can_finance, false) as can_finance,
           coalesce(can_bots, false) as can_bots
         from as_staff where workspace_id = ${uid} order by role asc, created_at asc
       `;
+      return rows.map((r) => ({
+        ...r,
+        can_invite: asBool(r.can_invite),
+        can_delete: asBool(r.can_delete),
+        can_assign: asBool(r.can_assign),
+        can_finance: asBool(r.can_finance),
+        can_bots: asBool(r.can_bots),
+      }));
     } catch {
       const rows = await sql<{
         id: number; user_id: string | null; email: string; name: string; role: string; blocked: boolean; created_at: string;
       }>`select id, user_id, email, name, role, blocked, created_at from as_staff where workspace_id = ${uid} order by role asc, created_at asc`;
-      return rows.map((r) => ({ ...r, can_invite: false, can_delete: true, can_assign: true, can_finance: false, can_bots: false }));
+      return rows.map((r) => ({ ...r, can_invite: false, can_delete: false, can_assign: false, can_finance: false, can_bots: false }));
     }
   });
 
@@ -636,11 +681,12 @@ export const inviteStaff = createServerFn({ method: "POST" })
     if (password.length < 8) return { ok: false as const, error: "Пароль минимум 8 символов" };
     const exists = await sql<{ id: number }>`select id from as_staff where workspace_id = ${uid} and email = ${email}`;
     if (exists[0]) return { ok: false as const, error: "Этот email уже в команде" };
-    const invite = actor.role === "owner" ? Boolean(data.can_invite) : false;
-    const del = data.can_delete !== false;
-    const assign = data.can_assign !== false;
-    const finance = actor.role === "owner" ? Boolean(data.can_finance) : false;
-    const bots = actor.role === "owner" ? Boolean(data.can_bots) : false;
+    const owner = actor.role === "owner";
+    const invite = owner && Boolean(data.can_invite);
+    const del = owner && Boolean(data.can_delete);
+    const assign = owner && Boolean(data.can_assign);
+    const finance = owner && Boolean(data.can_finance);
+    const bots = owner && Boolean(data.can_bots);
     const name = data.name?.trim() || email;
     let authUserId: string | null = null;
     try {
@@ -694,6 +740,7 @@ export const setClientBlocked = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "delete")) return { ok: false as const, error: NO_PERM };
     const row = await sql<{ id: number; name: string }>`select id, name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
     await sql`update as_clients set blocked = ${data.blocked} where user_id = ${uid} and id = ${data.id}`;
@@ -707,7 +754,7 @@ export const deleteClient = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    if (!can(actor, "delete")) return { ok: false as const, error: "Нет права удалять клиентов" };
+    if (!can(actor, "delete")) return { ok: false as const, error: NO_PERM };
     const row = await sql<{ name: string }>`select name from as_clients where user_id = ${uid} and id = ${data.id}`;
     if (!row[0]) return { ok: false as const, error: "Клиент не найден" };
     const ids = await sql<{ id: number }>`select id from as_orders where user_id = ${uid} and client_id = ${data.id}`;
@@ -733,6 +780,7 @@ export const setMasterBlocked = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "delete")) return { ok: false as const, error: NO_PERM };
     const status = data.blocked ? "blocked" : "offline";
     await sql`update as_masters set online_status = ${status} where user_id = ${uid} and id = ${data.id}`;
     await addAudit(sql, uid, data.blocked ? "block_master" : "unblock_master", "master", String(data.id), null, status);
@@ -745,7 +793,7 @@ export const deleteMaster = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    if (!can(actor, "delete")) return { ok: false as const, error: "Нет права удалять мастеров" };
+    if (!can(actor, "delete")) return { ok: false as const, error: NO_PERM };
     await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now(), master_id = null
       where user_id = ${uid} and master_id = ${data.id} and status in ('assigned','master_accepted','enroute','arrived','in_progress')`;
     try { await sql`delete from as_reviews where user_id = ${uid} and master_id = ${data.id}`; } catch { /* ignore */ }
@@ -764,7 +812,8 @@ export type BotListRow = {
 export const listBots = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
-    const { sql, uid } = await ctxSql(context.userId);
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "bots")) return [];
     const rows = await sql<{
       id: number; kind: string; label: string; bot_username: string | null; bot_token: string | null;
       connected_at: string | null; log_chat_id: string | null;
@@ -789,7 +838,7 @@ export const addServiceBot = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    if (!can(actor, "bots")) return { ok: false as const, error: "Нет права менять ботов", username: null as string | null, mode: null as string | null };
+    if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM, username: null as string | null, mode: null as string | null };
     const result = await connectExtraBot(
       sql,
       uid,
@@ -808,6 +857,7 @@ export const removeServiceBot = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM };
     await disconnectBotById(sql, uid, data.id);
     await addAudit(sql, uid, "remove_bot", "bot", String(data.id), null, null);
     return { ok: true as const };
@@ -819,7 +869,7 @@ export const saveRequisites = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    if (!can(actor, "bots")) return { ok: false as const, error: "Нет права менять настройки ботов" };
+    if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM };
     const channel = (data.channel ?? "").replace(/^@/, "").trim();
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
     const rawAlerts = (data.alertsChannel ?? "").trim();
@@ -852,13 +902,15 @@ export const testAlerts = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "bots")) return { ok: false as const, error: NO_PERM };
     return sendWorkspaceAlertTest(sql, uid, data.channel);
   });
 
 export const listPayments = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
   .handler(async ({ context }) => {
-    const { sql, uid } = await ctxSql(context.userId);
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "finance")) return [];
     return sql<{
       id: number; client_name: string; telegram_id: string | null; amount: number; screenshot: string;
       status: string; created_at: string; client_id: number | null;
@@ -874,7 +926,7 @@ export const reviewPayment = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    if (!can(actor, "finance")) return { ok: false as const, error: "Нет права подтверждать оплаты" };
+    if (!can(actor, "finance")) return { ok: false as const, error: NO_PERM };
     const row = await sql<{ id: number; telegram_id: string | null; client_id: number | null; client_name: string; status: string }>`
       select id, telegram_id, client_id, client_name, status from as_payments where user_id = ${uid} and id = ${data.id}
     `;
@@ -913,7 +965,8 @@ export const setMasterOnline = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((d: { masterId: number; online: boolean }) => d)
   .handler(async ({ context, data }) => {
-    const { sql, uid } = await ctxSql(context.userId);
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { ok: false as const, error: NO_PERM, status: "offline" as const };
     const status = data.online ? "online" : "offline";
     await sql`update as_masters set online_status = ${status}, last_seen = now() where user_id = ${uid} and id = ${data.masterId} and online_status <> 'blocked'`;
     return { ok: true as const, status };
@@ -931,8 +984,8 @@ export const setStaffPerms = createServerFn({ method: "POST" })
     await sql`
       update as_staff set
         can_invite = ${Boolean(data.can_invite)},
-        can_delete = ${data.can_delete !== false},
-        can_assign = ${data.can_assign !== false},
+        can_delete = ${Boolean(data.can_delete)},
+        can_assign = ${Boolean(data.can_assign)},
         can_finance = ${Boolean(data.can_finance)},
         can_bots = ${Boolean(data.can_bots)}
       where id = ${data.id} and workspace_id = ${uid}
@@ -990,6 +1043,7 @@ export const createRefLink = createServerFn({ method: "POST" })
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
+    if (!can(actor, "bots")) return { ok: false as const, code: "", link: "", error: NO_PERM };
     const label = data.label.trim() || "Реклама";
     const source = (data.source || "ads").trim().toLowerCase().replace(/[^a-z0-9_]/g, "").slice(0, 24) || "ads";
     const code = `c${makeRefCode()}`;

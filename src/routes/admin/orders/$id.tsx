@@ -4,6 +4,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cancelOrder, getOrder } from "@/lib/server/api";
 import { AssignDialog } from "@/components/admin/assign-dialog";
 import { OnlineDot, OrderBadge } from "@/components/admin/status-badge";
+import { useAccess } from "@/components/admin/access";
 import { Button } from "@/components/ui/button";
 import { serviceById } from "@/lib/catalog";
 import { formatSum } from "@/lib/domain";
@@ -30,6 +31,8 @@ function OrderPage() {
   const { id } = Route.useParams();
   const orderId = Number(id);
   const qc = useQueryClient();
+  const access = useAccess();
+  const canAssign = access.allowed("assign");
   const { data, isPending } = useQuery({
     queryKey: ["order", orderId],
     queryFn: () => getOrder({ data: orderId }),
@@ -44,7 +47,7 @@ function OrderPage() {
     return <p className="p-6 text-sm text-muted">Загрузка заявки…</p>;
   }
   const o = data.order;
-  const canAssign = o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned";
+  const statusAssign = o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned";
   let photos: string[] = [];
   try {
     const parsed = JSON.parse(o.photos) as unknown;
@@ -62,6 +65,9 @@ function OrderPage() {
         </div>
         <OrderBadge status={o.status} />
       </div>
+      {cancel.data && "error" in cancel.data && cancel.data.error ? (
+        <p className="text-sm text-warn">{String(cancel.data.error)}</p>
+      ) : null}
       <div className="grid gap-4 md:grid-cols-2">
         <section className="glass-card rounded-xl p-4">
           <h2 className="text-sm font-medium text-muted">Клиент</h2>
@@ -107,12 +113,12 @@ function OrderPage() {
           <p className="mt-2 text-sm text-muted">Ещё не назначен</p>
         )}
         <div className="mt-4 flex flex-wrap gap-2">
-          {canAssign ? (
+          {canAssign && statusAssign ? (
             <Button onClick={() => setAssign(true)}>
               {o.status === "master_rejected" ? "Назначить другого мастера" : "Назначить мастера"}
             </Button>
           ) : null}
-          {o.status !== "completed" && o.status !== "cancelled" ? (
+          {canAssign && o.status !== "completed" && o.status !== "cancelled" ? (
             <Button variant="outline" onClick={() => cancel.mutate()}>
               Отменить заявку
             </Button>
@@ -135,7 +141,7 @@ function OrderPage() {
           ))}
         </ol>
       </section>
-      {assign ? (
+      {assign && canAssign ? (
         <AssignDialog orderId={o.id} publicNo={o.public_no} clientName={o.client_name} onClose={() => setAssign(false)} />
       ) : null}
     </div>

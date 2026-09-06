@@ -2,12 +2,21 @@ import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { addServiceBot, dropBotToken, getBotSettings, listBots, removeServiceBot, saveBotToken, saveRequisites, testAlerts } from "@/lib/server/api";
+import { NeedPerm } from "@/components/admin/access";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 export const Route = createFileRoute("/admin/settings")({ component: SettingsPage });
 
 function SettingsPage() {
+  return (
+    <NeedPerm perm="bots">
+      <SettingsInner />
+    </NeedPerm>
+  );
+}
+
+function SettingsInner() {
   const qc = useQueryClient();
   const { data } = useQuery({ queryKey: ["bot-settings"], queryFn: () => getBotSettings() });
   const { data: bots = [] } = useQuery({ queryKey: ["bots"], queryFn: () => listBots() });

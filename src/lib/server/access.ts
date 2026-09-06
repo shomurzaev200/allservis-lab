@@ -22,17 +22,21 @@ export type Actor = {
   perms: Perms;
 };
 
+function flag(v: unknown): boolean {
+  return v === true || v === "t" || v === "true" || v === 1 || v === "1";
+}
+
 function ownerPerms(): Perms {
   return { invite: true, delete: true, assign: true, finance: true, bots: true };
 }
 
-function staffPerms(row: { can_invite?: boolean; can_delete?: boolean; can_assign?: boolean; can_finance?: boolean; can_bots?: boolean }): Perms {
+function staffPerms(row: { can_invite?: unknown; can_delete?: unknown; can_assign?: unknown; can_finance?: unknown; can_bots?: unknown }): Perms {
   return {
-    invite: Boolean(row.can_invite),
-    delete: row.can_delete !== false,
-    assign: row.can_assign !== false,
-    finance: Boolean(row.can_finance),
-    bots: Boolean(row.can_bots),
+    invite: flag(row.can_invite),
+    delete: flag(row.can_delete),
+    assign: flag(row.can_assign),
+    finance: flag(row.can_finance),
+    bots: flag(row.can_bots),
   };
 }
 
@@ -62,8 +66,8 @@ export async function resolveActor(sql: Sql, userId: string): Promise<Actor> {
     byUser = await sql`
       select workspace_id, role, blocked, email, name,
         coalesce(can_invite, false) as can_invite,
-        coalesce(can_delete, true) as can_delete,
-        coalesce(can_assign, true) as can_assign,
+        coalesce(can_delete, false) as can_delete,
+        coalesce(can_assign, false) as can_assign,
         coalesce(can_finance, false) as can_finance,
         coalesce(can_bots, false) as can_bots
       from as_staff where user_id = ${userId} limit 1
@@ -88,11 +92,24 @@ export async function resolveActor(sql: Sql, userId: string): Promise<Actor> {
 
   const invite = await sql<{
     id: number; workspace_id: string; role: string; blocked: boolean;
+    can_invite?: boolean; can_delete?: boolean; can_assign?: boolean; can_finance?: boolean; can_bots?: boolean;
   }>`
-    select id, workspace_id, role, blocked from as_staff
+    select id, workspace_id, role, blocked,
+      coalesce(can_invite, false) as can_invite,
+      coalesce(can_delete, false) as can_delete,
+      coalesce(can_assign, false) as can_assign,
+      coalesce(can_finance, false) as can_finance,
+      coalesce(can_bots, false) as can_bots
+    from as_staff
     where email = ${email} and user_id is null
     limit 1
-  `;
+  `.catch(async () =>
+    sql<{ id: number; workspace_id: string; role: string; blocked: boolean }>`
+      select id, workspace_id, role, blocked from as_staff
+      where email = ${email} and user_id is null
+      limit 1
+    `,
+  );
   if (invite[0]) {
     if (invite[0].blocked) throw new Error("BLOCKED");
     await sql`update as_staff set user_id = ${userId}, name = ${name} where id = ${invite[0].id}`;
@@ -104,8 +121,13 @@ export async function resolveActor(sql: Sql, userId: string): Promise<Actor> {
       email,
       name,
       blocked: false,
-      perms: invite[0].role === "owner" ? ownerPerms() : { invite: false, delete: true, assign: true, finance: false, bots: false },
+      perms: invite[0].role === "owner" ? ownerPerms() : staffPerms(invite[0]),
     };
+  }
+
+  const existingOwner = await sql<{ n: number }>`select 1 as n from as_staff where role = ${"owner"} limit 1`;
+  if (existingOwner[0]) {
+    throw new Error("NOT_INVITED");
   }
 
   await ensureWorkspace(sql, userId);
