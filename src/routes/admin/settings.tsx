@@ -154,8 +154,8 @@ function SettingsInner() {
       <section className="glass-card space-y-4 rounded-xl border border-accent/30 p-5">
         <h2 className="font-medium">Алерты — только закрытый канал отчётов</h2>
         <p className="text-sm text-muted">
-          Сюда идут заявки и кто что нажал. <span className="text-fg">Не указывайте публичный канал для клиентов</span> — туда алерты больше не пишутся.
-          Публичный @канал — в блоке «Обязательная подписка» ниже.
+          Сюда идут заявки и кто что нажал. <span className="text-fg">Публичный канал подписки клиентов — не сюда</span>.
+          Если отчёты видны клиентам — канал привязан неправильно: нажмите «Не слать алерты в канал», затем перешлите боту пост из закрытого канала.
         </p>
         {data?.lastAlertError ? (
           <p className="rounded-lg bg-danger/10 px-4 py-3 text-sm text-danger">Ошибка: {data.lastAlertError}</p>

@@ -5,7 +5,7 @@ import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
 import { addAudit, addEvent, addNote, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
-import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap } from "./telegram";
+import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
 
 async function ctxSql(userId: string) {
@@ -939,6 +939,7 @@ export const saveRequisites = createServerFn({ method: "POST" })
       try { await sql`update as_bots set log_chat_id = ${null} where user_id = ${uid} and kind = ${"logs"}`; } catch { /* ignore */ }
     }
     await addAudit(sql, uid, "save_requisites", "workspace", uid, null, channel || "requisites", who(actor));
+    try { await sanitizeAlertRouting(sql, uid); } catch { /* ignore */ }
     return { ok: true as const, error: null as string | null };
   });
 
