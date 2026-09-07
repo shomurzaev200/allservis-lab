@@ -47,6 +47,8 @@ const RU: Dict = {
   live: "Заявка у диспетчера. Статус придёт сюда.",
   startHint: "Чтобы вызвать мастера — нажмите «Вызвать мастера».",
   thanksRate: "Спасибо. Оценка ушла администратору.",
+  askReview: "Можете написать отзыв текстом или нажать меню.",
+  reviewSaved: "Отзыв сохранён. Спасибо!",
   newOrder: "Новая заявка",
   menu: "Меню",
   masterSpec: "Какая специальность?",
@@ -96,6 +98,8 @@ const UZ: Dict = {
   live: "Ariza dispatcherga ketdi. Status shu yerga keladi.",
   startHint: "Usta chaqirish uchun «Usta chaqirish» ni bosing.",
   thanksRate: "Rahmat. Baholash adminga ketdi.",
+  askReview: "Matnli izoh yozishingiz yoki menyuni bosishingiz mumkin.",
+  reviewSaved: "Izoh saqlandi. Rahmat!",
   newOrder: "Yangi ariza",
   menu: "Menyu",
   masterSpec: "Mutaxassislik?",
@@ -350,6 +354,7 @@ export type BotResult = {
   registerMaster?: boolean;
   setOnline?: boolean;
   supportText?: string;
+  reviewText?: string;
 };
 
 function nearestDistrict(lat: number, lng: number) {
@@ -717,9 +722,9 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   if (tapId.startsWith("rate:")) {
     return {
       userMessage: user(`${tapId.slice(5)}`),
-      replies: [bot(t(lang, "thanksRate"), { buttons: [[{ id: "cmd:start", label: t(lang, "newOrder") }]] })],
-      step: "idle",
-      draft: { ...emptyDraft(), lang, role: draft.role, name: draft.name },
+      replies: [bot(`${t(lang, "thanksRate")}\n${t(lang, "askReview")}`, { buttons: clientMenuKeys(lang) })],
+      step: "rate",
+      draft: { ...draft, lang, role: draft.role, name: draft.name },
     };
   }
 
@@ -973,6 +978,26 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         supportText: raw,
       };
     }
+  }
+
+  if (step === "rate") {
+    if (tapId.startsWith("cmd:") || tapId.startsWith("svc:") || tapId.startsWith("role:") || tapId.startsWith("lang:")) {
+      /* menu handled above */
+    } else if (raw) {
+      return {
+        userMessage: user(raw),
+        replies: [bot(t(lang, "reviewSaved"), { buttons: clientMenuKeys(lang) })],
+        step: "category",
+        draft,
+        reviewText: raw.slice(0, 500),
+      };
+    }
+    return {
+      userMessage: user(raw),
+      replies: [bot(t(lang, "askReview"), { buttons: clientMenuKeys(lang) })],
+      step: "rate",
+      draft,
+    };
   }
 
   if (step === "live") {

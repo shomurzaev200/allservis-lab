@@ -250,9 +250,21 @@ async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderI
   const menu = status === "completed" || status === "cancelled" || status === "master_rejected" ? markup(clientMenu(lang)) : undefined;
   await tg(token, "sendMessage", {
     chat_id: Number(chat),
-    text: `${head}\nЗаявка №${o.public_no}${extra}`,
+    text: `${head}\nЗаявка №${o.public_no}${extra}${status === "completed" ? "\n\nОцените мастера звёздами. Потом можно написать отзыв текстом." : ""}`,
     reply_markup: rateKb ?? menu ?? undefined,
   });
+  if (status === "completed" || status === "cancelled" || status === "master_rejected") {
+    try {
+      await sql`
+        update as_tg_sessions
+        set step = ${status === "completed" ? "rate" : "category"},
+            last_status = ${status},
+            live_order_id = ${status === "completed" ? orderId : null},
+            updated_at = now()
+        where user_id = ${uid} and chat_id = ${chat}
+      `;
+    } catch { /* ignore */ }
+  }
 }
 
 async function applyJob(sql: Sql, uid: string, token: string, masterTg: string, data: string) {
@@ -338,6 +350,63 @@ async function saveStars(sql: Sql, uid: string, token: string, chatId: string, d
     text: `Спасибо, ${stars} ★. Можете написать отзыв текстом или нажать меню.`,
     reply_markup: markup(clientMenu("ru")),
   });
+  try {
+    await sql`
+      update as_tg_sessions
+      set step = ${"rate"}, live_order_id = ${orderId}, last_status = ${"completed"}, updated_at = now()
+      where user_id = ${uid} and chat_id = ${chatId}
+    `;
+  } catch { /* ignore */ }
+}
+
+async function saveReviewComment(sql: Sql, uid: string, chatId: string, text: string, orderId?: number | null) {
+  const comment = text.slice(0, 500);
+  const oid = orderId
+    ? [{ id: orderId }]
+    : await sql<{ id: number }>`
+        select o.id from as_orders o
+        join as_clients c on c.id = o.client_id
+        where o.user_id = ${uid} and c.telegram_id = ${chatId} and o.status = 'completed'
+        order by o.completed_at desc nulls last, o.updated_at desc
+        limit 1
+      `;
+  const id = oid[0]?.id;
+  if (!id) return;
+  const existing = await sql<{ id: number }>`
+    select id from as_reviews where user_id = ${uid} and order_id = ${id} order by created_at desc limit 1
+  `;
+  if (existing[0]) {
+    await sql`update as_reviews set comment = ${comment} where id = ${existing[0].id}`;
+  } else {
+    const o = await sql<{ client_id: number; master_id: number | null }>`
+      select client_id, master_id from as_orders where user_id = ${uid} and id = ${id}
+    `;
+    if (o[0]) {
+      await sql`
+        insert into as_reviews (user_id, order_id, client_id, master_id, rating, comment)
+        values (${uid}, ${id}, ${o[0].client_id}, ${o[0].master_id}, ${5}, ${comment})
+      `;
+    }
+  }
+  const card = await sql<{ public_no: number; rating: number; master_name: string | null }>`
+    select o.public_no, coalesce(r.rating, 5) as rating,
+      nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') as master_name
+    from as_orders o
+    left join as_reviews r on r.order_id = o.id
+    left join as_masters m on m.id = o.master_id
+    where o.user_id = ${uid} and o.id = ${id}
+    order by r.created_at desc nulls last
+    limit 1
+  `;
+  const row = card[0];
+  const stars = "★".repeat(Math.max(1, Math.min(5, Math.round(Number(row?.rating) || 5))));
+  await pushWorkspaceLog(sql, uid, [
+    "<b>⭐ Отзыв клиента</b>",
+    row ? `📋 Заявка №${row.public_no}` : "",
+    row?.master_name ? `👷 ${escHtml(row.master_name)}` : "",
+    `${stars}`,
+    `💬 ${escHtml(comment)}`,
+  ].filter(Boolean).join("\n"), { parseMode: "HTML" });
 }
 
 async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: string, tapId: string, loc?: { lat: number; lng: number }) {
@@ -1053,22 +1122,6 @@ export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverr
   if (chatOverride?.trim() && subRaw && await destinationIsSubscribe(probeTokens[0] ?? "", chatOverride, subRaw)) {
     return { ok: false as const, error: SUBSCRIBE_ALERT_HINT };
   }
-  if (chatOverride?.trim()) {
-    let allowSave = true;
-    if (subRaw && probeTokens[0] && await destinationIsSubscribe(probeTokens[0], chatOverride, subRaw)) allowSave = false;
-    if (allowSave) {
-      for (const id of chatIdVariants(chatOverride)) {
-        if (id.startsWith("-") || id.startsWith("@")) {
-          try { await sql`update as_workspace set alerts_channel_id = ${id} where user_id = ${userId}`; } catch { /* ignore */ }
-          break;
-        }
-      }
-      try {
-        const first = chatIdVariants(chatOverride)[0];
-        if (first && !first.startsWith("@")) await sql`update as_bots set log_chat_id = ${first} where user_id = ${userId} and kind = ${"logs"}`;
-      } catch { /* ignore */ }
-    }
-  }
   const { tokens, channelTargets } = await collectAlertRoutes(sql, userId);
   if (chatOverride?.trim() && tokens[0]) {
     const subKeys = subRaw ? await expandIdentity(tokens, subRaw) : new Set<string>();
@@ -1108,11 +1161,21 @@ export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverr
       lastErr = r.description ?? lastErr;
     }
   }
-  const hint = [
-    explainAlertError(lastErr),
-    `Пробовали: ${attempts.join("; ")}`,
-    "Закрытый канал отчётов: добавьте основного бота админом с правом «Публикация сообщений», перешлите ему пост из ЭТОГО канала (не из публичного).",
-  ].join(" ");
+  const hint = lastErr.toLowerCase().includes("chat not found")
+    ? [
+        "Бот не видит этот канал (chat not found).",
+        "ID в поле можно вставить, но Telegram пускает только если бот УЖЕ админ канала.",
+        "1) Откройте ЗАКРЫТЫЙ канал отчётов → Администраторы → Добавить → найдите @" + "allservic24_bot (это бот, не человек).",
+        "2) Включите «Публикация сообщений».",
+        "3) Напишите любой пост в этот канал ИЛИ перешлите пост из канала в личку боту.",
+        "После этого ID подставится сам. Вставлять −100… вручную не нужно, если бот не в канале.",
+        attempts.length ? `Пробовали: ${attempts.join("; ")}` : "",
+      ].filter(Boolean).join(" ")
+    : [
+        explainAlertError(lastErr),
+        `Пробовали: ${attempts.join("; ")}`,
+        "Закрытый канал: добавьте @allservic24_bot админом с правом «Публикация сообщений», затем перешлите ему пост из ЭТОГО канала.",
+      ].join(" ");
   try { await sql`update as_workspace set last_alert_error = ${hint} where user_id = ${userId}`; } catch { /* ignore */ }
   return { ok: false as const, error: hint };
 }
@@ -1755,7 +1818,6 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const uid = ws.user_id;
 
   if (update.channel_post?.chat) {
-    if (kind !== "logs") return { ok: true };
     const ch = update.channel_post.chat;
     if (ch.username) return { ok: true };
     const cid = String(ch.id);
@@ -1770,10 +1832,12 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   if (update.my_chat_member) {
     const ch = update.my_chat_member.chat;
     const st = update.my_chat_member.new_chat_member?.status ?? "";
-    if (ch.username) {
-      if (kind === "logs") return { ok: true };
-    } else if (kind === "logs" && (ch.type === "channel" || ch.type === "supergroup") && (st === "administrator" || st === "creator" || st === "member")) {
+    const added = (ch.type === "channel" || ch.type === "supergroup")
+      && (st === "administrator" || st === "creator")
+      && !ch.username;
+    if (added) {
       await bindAlertChannel(sql, uid, String(ch.id), token, ch.title ?? ch.username);
+      return { ok: true };
     }
     if (kind === "logs") return { ok: true };
   }
@@ -1854,6 +1918,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     select step, draft, live_order_id, last_status from as_tg_sessions where user_id = ${uid} and chat_id = ${chatId}
   `;
   let step = (sess[0]?.step ?? "lang") as ChatStep;
+  if (step === "live" && sess[0]?.last_status === "completed") step = "rate";
   let draft: Draft = sess[0]?.draft ? (JSON.parse(sess[0].draft) as Draft) : emptyDraft();
   draft = { ...emptyDraft(), ...draft, name };
   const live = Boolean(sess[0]?.live_order_id) || step === "live";
@@ -2047,6 +2112,17 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       }
       return { ok: true };
     }
+  }
+
+  if (result.reviewText) {
+    await saveReviewComment(sql, uid, chatId, result.reviewText, sess[0]?.live_order_id);
+    step = "category";
+    try {
+      await sql`
+        update as_tg_sessions set live_order_id = ${null}, step = ${"category"}, last_status = ${"completed"}, updated_at = now()
+        where user_id = ${uid} and chat_id = ${chatId}
+      `;
+    } catch { /* ignore */ }
   }
 
   if (result.supportText) {
