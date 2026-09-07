@@ -31,6 +31,9 @@ const RU: Dict = {
   geoOk: "Геолокация записана. Отправьте номер телефона кнопкой.",
   districtOk: "Район записан. Теперь точная геолокация — или сразу номер.",
   skipGeo: "Района достаточно",
+  keepGeo: "✅ Не менять локацию",
+  newGeo: "📍 Отправить новую",
+  askKeepGeo: "Локация с прошлого раза. Отправить новую точку или не менять?",
   pickDistrict: "Выберите район или нажмите «Отправить геолокацию».",
   sharePhone: "📱 Отправить номер",
   needPhone: "Нажмите «Отправить номер» или введите +998 90 123 45 67.",
@@ -77,6 +80,9 @@ const UZ: Dict = {
   geoOk: "Joylashuv yozildi. Telefon raqamini tugma orqali yuboring.",
   districtOk: "Tuman yozildi. Endi aniq geolokatsiya — yoki raqam.",
   skipGeo: "Tuman yetarli",
+  keepGeo: "✅ O‘zgartirmaslik",
+  newGeo: "📍 Yangi lokatsiya",
+  askKeepGeo: "Oxirgi lokatsiya saqlangan. Yangisini yuborasizmi yoki qoldiramizmi?",
   pickDistrict: "Tumanni tanlang yoki geolokatsiya yuboring.",
   sharePhone: "📱 Raqamni yuborish",
   needPhone: "«Raqamni yuborish» ni bosing yoki +998 90 123 45 67 yozing.",
@@ -171,6 +177,62 @@ function districtKeys(lang: Lang | undefined): KeyboardButton[][] {
 
 function geoKeys(lang: Lang | undefined): KeyboardButton[][] {
   return [[{ id: "geo:share", label: t(lang, "shareGeo"), requestLocation: true }], ...districtKeys(lang)];
+}
+
+function keepGeoKeys(lang: Lang | undefined): KeyboardButton[][] {
+  return [
+    [{ id: "geo:keep", label: t(lang, "keepGeo") }],
+    [{ id: "geo:new", label: t(lang, "newGeo"), requestLocation: true }],
+  ];
+}
+
+function geoPrompt(draft: Draft, lang: Lang | undefined): string {
+  const dist = draft.districtId
+    ? (lang === "uz" ? (DIST_UZ[draft.districtId] ?? districtTitle(draft.districtId)) : districtTitle(draft.districtId))
+    : "";
+  const lat = Number(draft.lat);
+  const lng = Number(draft.lng);
+  const geo = Number.isFinite(lat) && Number.isFinite(lng) ? `${lat.toFixed(5)}, ${lng.toFixed(5)}` : "";
+  const where = [dist, geo].filter(Boolean).join(" · ");
+  return where ? `${t(lang, "askKeepGeo")}\n${where}` : t(lang, "askKeepGeo");
+}
+
+function districtTitle(id: string) {
+  return DISTRICTS.find((d) => d.id === id)?.title ?? id;
+}
+
+function afterKeepGeo(draft: Draft, lang: Lang | undefined, userMessage: ChatMessage): BotResult {
+  if (draft.phone) {
+    return {
+      userMessage,
+      replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
+      step: "comment",
+      draft,
+    };
+  }
+  return {
+    userMessage,
+    replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
+    step: "phone",
+    draft,
+  };
+}
+
+function afterPhotos(draft: Draft, lang: Lang | undefined, userMessage: ChatMessage): BotResult {
+  if (draft.lat != null && draft.lng != null && Number.isFinite(Number(draft.lat)) && Number.isFinite(Number(draft.lng))) {
+    return {
+      userMessage,
+      replies: [bot(geoPrompt(draft, lang), { buttons: keepGeoKeys(lang) })],
+      step: "geo_choice",
+      draft,
+    };
+  }
+  return {
+    userMessage,
+    replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
+    step: "district",
+    draft,
+  };
 }
 
 function phoneKeys(lang: Lang | undefined): KeyboardButton[][] {
@@ -375,11 +437,16 @@ export function labelToTapId(raw: string): string | null {
     for (const row of allMenuRows(lang)) {
       for (const b of row) if (fold(b.label) === q) return b.id;
     }
+    for (const row of keepGeoKeys(lang)) {
+      for (const b of row) if (fold(b.label) === q) return b.id;
+    }
     for (const row of districtKeys(lang)) {
       for (const b of row) if (fold(b.label) === q) return b.id;
     }
   }
   if (q === fold(RU.skipPhoto) || q === fold(UZ.skipPhoto) || q.includes("пропуст") || q.includes("fotosiz")) return "photo:skip";
+  if (q === fold(RU.keepGeo) || q === fold(UZ.keepGeo) || q.includes("не менять") || q.includes("zgartirmas")) return "geo:keep";
+  if (q === fold(RU.newGeo) || q === fold(UZ.newGeo) || q.includes("новую") || q.includes("yangi lokatsiya")) return "geo:new";
   if (q === fold(RU.skipGeo) || q === fold(UZ.skipGeo)) return "geo:skip";
   if (q === fold(RU.skipComment) || q === fold(UZ.skipComment) || q.includes("изохсиз")) return "cmt:skip";
   if (q === fold(RU.confirm) || q === "подтвердить" || q === "tasdiqlash") return "confirm:yes";
@@ -442,27 +509,17 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   if (event.type === "photo") {
     if (step !== "photo") return { replies: [], step, draft };
     const photos = [...draft.photos, event.dataUrl].slice(0, 3);
-    const nextStep: ChatStep = photos.length >= 3 ? (draft.phone && draft.lat ? "comment" : "district") : "photo";
+    if (photos.length >= 3) {
+      return afterPhotos({ ...draft, photos }, lang, user("📷"));
+    }
     return {
       userMessage: user("📷"),
       replies: [
-        bot(
-          photos.length >= 3
-            ? draft.phone && draft.lat
-              ? t(lang, "commentAsk")
-              : t(lang, "enoughPhoto")
-            : t(lang, "morePhoto"),
-          {
-            buttons:
-              photos.length >= 3
-                ? draft.phone && draft.lat
-                  ? [[{ id: "cmt:skip", label: t(lang, "skipComment") }]]
-                  : geoKeys(lang)
-                : [[{ id: "photo:skip", label: t(lang, "skipPhoto") }], ...(draft.phone && draft.lat ? [] : geoKeys(lang))],
-          },
-        ),
+        bot(t(lang, "morePhoto"), {
+          buttons: [[{ id: "photo:skip", label: t(lang, "skipPhoto") }]],
+        }),
       ],
-      step: nextStep,
+      step: "photo",
       draft: { ...draft, photos },
     };
   }
@@ -478,20 +535,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         registerMaster: true,
       };
     }
-    if (step === "phone") {
-      return {
-        userMessage: user("📍"),
-        replies: [bot(t(lang, "geoOk"), { buttons: phoneKeys(lang) })],
-        step: "phone",
-        draft: next,
-      };
-    }
-    return {
-      userMessage: user("📍"),
-      replies: [bot(t(lang, "geoOk"), { buttons: phoneKeys(lang) })],
-      step: "phone",
-      draft: next,
-    };
+    return afterKeepGeo(next, lang, user("📍"));
   }
 
   const raw = event.type === "text" ? event.text.trim() : event.type === "tap" ? event.label : "";
@@ -644,7 +688,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     return {
       userMessage: user(lang === "uz" ? "Yordam" : "Поддержка"),
       replies: [bot(
-        lang === "uz" ? "Savolingizni bitta xabarda yozing — dispatcher ko‘radi." : "Напишите вопрос одним сообщением — диспетчер увидит.",
+        lang === "uz" ? "Savolingizni yozing — dispatcher siz bilan bog‘lanadi." : "Напишите вопрос — диспетчер свяжется с вами.",
         { buttons: step === "live" ? liveMenuKeys(lang) : clientMenuKeys(lang) },
       )],
       step: "support",
@@ -777,16 +821,21 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
 
   if (step === "photo") {
     if (tapId === "photo:skip" || lower.includes("пропуст") || lower.includes("fotosiz") || lower.includes("o‘tkaz") || lower.includes("otkaz")) {
-      if (draft.phone && draft.lat && draft.districtId) {
-        return {
-          userMessage: user(t(lang, "skipPhoto")),
-          replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
-          step: "comment",
-          draft,
-        };
-      }
+      return afterPhotos(draft, lang, user(t(lang, "skipPhoto")));
+    }
+    return {
+      userMessage: user(raw),
+      replies: [bot(t(lang, "sendPhoto"), { buttons: [[{ id: "photo:skip", label: t(lang, "skipPhoto") }]] })],
+      step: "photo",
+      draft,
+    };
+  }
+
+  if (step === "geo_choice") {
+    if (tapId === "geo:keep") return afterKeepGeo(draft, lang, user(t(lang, "keepGeo")));
+    if (tapId === "geo:new") {
       return {
-        userMessage: user(t(lang, "skipPhoto")),
+        userMessage: user(t(lang, "newGeo")),
         replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
         step: "district",
         draft,
@@ -794,8 +843,8 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     }
     return {
       userMessage: user(raw),
-      replies: [bot(t(lang, "sendPhoto"), { buttons: [[{ id: "photo:skip", label: t(lang, "skipPhoto") }]] })],
-      step: "photo",
+      replies: [bot(geoPrompt(draft, lang), { buttons: keepGeoKeys(lang) })],
+      step: "geo_choice",
       draft,
     };
   }
@@ -918,7 +967,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     } else if (raw) {
       return {
         userMessage: user(raw),
-        replies: [bot(lang === "uz" ? "Dispatcher oldi. Javob shu yerga keladi." : "Передал диспетчеру. Ответ придёт сюда.", { buttons: clientMenuKeys(lang) })],
+        replies: [bot(lang === "uz" ? "Dispatcher siz bilan bog‘lanadi." : "Передал. Диспетчер свяжется с вами.", { buttons: clientMenuKeys(lang) })],
         step: "category",
         draft,
         supportText: raw,
@@ -941,7 +990,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (raw && !tapId.startsWith("cmd:") && !tapId.startsWith("rate:")) {
       return {
         userMessage: user(raw),
-        replies: [bot(lang === "uz" ? "Dispatcher oldi." : "Передал диспетчеру.", { buttons: liveMenuKeys(lang) })],
+        replies: [bot(lang === "uz" ? "Dispatcher siz bilan bog‘lanadi." : "Передал. Диспетчер свяжется с вами.", { buttons: liveMenuKeys(lang) })],
         step: "live",
         draft,
         supportText: raw,

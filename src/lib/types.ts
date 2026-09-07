@@ -7,6 +7,7 @@ export type ChatStep =
   | "category"
   | "problem"
   | "photo"
+  | "geo_choice"
   | "district"
   | "geo"
   | "phone"

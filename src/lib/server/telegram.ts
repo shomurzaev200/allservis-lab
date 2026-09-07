@@ -789,24 +789,9 @@ async function collectAlertRoutes(sql: Sql, userId: string) {
     }
   } catch { /* ignore */ }
   if (subscribeRaw) {
-    const subKeys = channelKeys(subscribeRaw);
-    for (const token of tokenList) {
-      for (const ref of chatIdVariants(subscribeRaw)) {
-        const looked = await tg(token, "getChat", { chat_id: ref });
-        if (looked.ok && looked.result && !Array.isArray(looked.result)) {
-          const r = looked.result as { id?: number; username?: string };
-          if (r.id != null) subKeys.add(String(r.id));
-          if (r.username) subKeys.add(`@${String(r.username).toLowerCase()}`);
-        }
-      }
-      if ([...subKeys].some((k) => k.startsWith("-"))) break;
+    for (const id of [...channelTargets]) {
+      if (id.startsWith("@") && channelOverlap(subscribeRaw, id)) channelTargets.delete(id);
     }
-    const hit = (id: string) => {
-      for (const k of channelKeys(id)) if (subKeys.has(k)) return true;
-      return false;
-    };
-    for (const id of [...channelTargets]) if (hit(id)) channelTargets.delete(id);
-    for (const id of [...dmTargets]) if (hit(id)) dmTargets.delete(id);
   }
   const hasNumeric = [...channelTargets].some((id) => id.startsWith("-"));
   if (hasNumeric) {
@@ -890,7 +875,7 @@ export async function pushWorkspaceLog(
   const dmList = [...dmTargets];
   if (!channelList.length && !dmList.length) {
     try {
-      await sql`update as_workspace set last_alert_error = ${"Нет ID канала. Настройки: вставьте −100… ИЛИ перешлите боту пост из канала ИЛИ добавьте основного бота админом канала."} where user_id = ${userId}`;
+      await sql`update as_workspace set last_alert_error = ${"Нет ID канала отчётов. В Настройках вставьте −100… закрытого канала ИЛИ перешлите боту пост из него. Публичный канал подписки сюда не подходит."} where user_id = ${userId}`;
     } catch { /* ignore */ }
     return;
   }
@@ -1004,7 +989,7 @@ export async function sendWorkspaceAlertTest(sql: Sql, userId: string, chatOverr
     const row = await sql<{ channel_username: string | null }>`select channel_username from as_workspace where user_id = ${userId}`;
     subRaw = (row[0]?.channel_username ?? "").trim();
   } catch { /* ignore */ }
-  if (chatOverride?.trim() && subRaw && channelOverlap(subRaw, chatOverride)) {
+  if (chatOverride?.trim() && subRaw && !chatOverride.includes("-100") && !chatOverride.trim().startsWith("-") && channelOverlap(subRaw, chatOverride)) {
     return { ok: false as const, error: "Это канал подписки клиентов. Алерты туда не идут. Укажите ДРУГОЙ канал для отчётов (закрытый −100…), а @username оставьте в блоке «Обязательная подписка»." };
   }
   if (chatOverride?.trim()) {
@@ -1444,20 +1429,54 @@ function kbClient(lang: string | undefined, live: boolean) {
   return live ? liveMenu(lang === "uz" ? "uz" : "ru") : clientMenu(lang === "uz" ? "uz" : "ru");
 }
 
-async function pushSupportAlert(sql: Sql, uid: string, name: string, chatId: string, text: string) {
+async function pushSupportAlert(
+  sql: Sql,
+  uid: string,
+  chatId: string,
+  opts: { name: string; username?: string | null; text: string; isMaster?: boolean },
+) {
   try {
-    await pushWorkspaceLog(
-      sql,
-      uid,
-      [
-        "<b>💬 Сообщение клиента</b>",
-        `👤 <b>${escHtml(name)}</b>`,
-        `📱 Telegram: <code>${escHtml(chatId)}</code>`,
-        text ? `💬 ${escHtml(text)}` : "Просит оператора",
-      ].filter(Boolean).join("\n"),
-      { parseMode: "HTML" },
-    );
-  } catch { /* ignore */ }
+    const c = await sql<{ name: string; phone: string; district: string; lat: number | null; lng: number | null; role: string }>`
+    select name, phone, district, lat, lng, coalesce(role, 'client') as role
+    from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  const last = await sql<{ public_no: number; status: string; description: string; comment: string; district: string }>`
+    select o.public_no, o.status, o.description, o.comment, o.district
+    from as_orders o join as_clients cl on cl.id = o.client_id
+    where o.user_id = ${uid} and cl.telegram_id = ${chatId}
+    order by o.created_at desc limit 1
+  `;
+  const row = c[0];
+  const o = last[0];
+  const who = opts.isMaster || row?.role === "master" ? "Мастер" : "Клиент";
+  const uname = (opts.username ?? "").replace(/^@/, "");
+  const geo = row?.lat != null && row?.lng != null ? `${Number(row.lat).toFixed(5)}, ${Number(row.lng).toFixed(5)}` : "";
+  const lines = [
+    `<b>📞 ${who} просит связаться</b>`,
+    `👤 <b>${escHtml(opts.name || row?.name || "—")}</b>`,
+    uname ? `🔗 @${escHtml(uname)}` : "",
+    `🆔 <code>${escHtml(chatId)}</code>`,
+    row?.phone ? `📱 <code>${escHtml(row.phone)}</code>` : "📱 телефон не указан",
+    row?.district ? `🏙 ${escHtml(row.district)}` : "",
+    geo ? `📍 <code>${escHtml(geo)}</code>` : "",
+    o ? `📋 Заявка №${o.public_no} · ${escHtml(STATUS_LABEL[o.status as OrderStatus] ?? o.status)}` : "",
+    o?.description ? `🔧 Что случилось: ${escHtml(o.description)}` : "",
+    o?.comment ? `📝 Комментарий к заявке: ${escHtml(o.comment)}` : "",
+    opts.text ? `💬 Сообщение: ${escHtml(opts.text)}` : "",
+  ].filter(Boolean);
+  await pushWorkspaceLog(sql, uid, lines.join("\n"), {
+    parseMode: "HTML",
+    lat: row?.lat != null ? Number(row.lat) : null,
+    lng: row?.lng != null ? Number(row.lng) : null,
+  });
+  } catch {
+    await pushWorkspaceLog(sql, uid, [
+      `<b>📞 Просит связаться</b>`,
+      `👤 <b>${escHtml(opts.name)}</b>`,
+      `🆔 <code>${escHtml(chatId)}</code>`,
+      opts.text ? `💬 ${escHtml(opts.text)}` : "",
+    ].filter(Boolean).join("\n"), { parseMode: "HTML" });
+  }
 }
 
 async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
@@ -1741,7 +1760,6 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   }
   if (tapGuess === "cmd:support") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    await pushSupportAlert(sql, uid, name, chatId, "Просит оператора");
     await sql`
       insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
       values (${uid}, ${chatId}, ${"support"}, ${JSON.stringify(draft)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
@@ -1750,8 +1768,8 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
       text: lang === "uz"
-        ? "Savolingizni bitta xabarda yozing — dispatcher ko‘radi."
-        : "Напишите вопрос одним сообщением — диспетчер увидит в алертах.",
+        ? "Savolingizni yozing — dispatcher siz bilan bog‘lanadi."
+        : "Напишите вопрос — диспетчер свяжется с вами.",
       reply_markup: markup(kbClient(lang, live)),
     });
     return { ok: true };
@@ -1900,7 +1918,12 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   }
 
   if (result.supportText) {
-    await pushSupportAlert(sql, uid, name, chatId, result.supportText);
+    await pushSupportAlert(sql, uid, chatId, {
+      name,
+      username: from.username,
+      text: result.supportText,
+      isMaster: Boolean(masterExists[0] && draft.role === "master"),
+    });
     if (sess[0]?.live_order_id) step = "live";
   }
 

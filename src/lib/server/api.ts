@@ -907,7 +907,7 @@ export const saveRequisites = createServerFn({ method: "POST" })
     const amount = Math.max(0, Math.round(Number(data.payAmount ?? 0) || 0));
     const rawAlerts = (data.alertsChannel ?? "").trim();
     let alerts = rawAlerts ? normalizeChatId(rawAlerts) : "";
-    if (alerts && channel && channelOverlap(channel, alerts)) alerts = "";
+    if (alerts && channel && !alerts.startsWith("-") && channelOverlap(channel, alerts)) alerts = "";
     const requireSub = data.requireSubscribe !== false;
     try {
       await sql`
