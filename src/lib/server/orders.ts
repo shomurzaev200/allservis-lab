@@ -1,5 +1,6 @@
 import { SERVICES, serviceById } from "@/lib/catalog";
 import { addAudit, addEvent, addNote, type Sql } from "./workspace";
+import { trackRefEvent } from "./refs";
 
 export type CreateOrderInput = {
   name: string;
@@ -64,6 +65,9 @@ export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput)
     const code = cl[0]?.referred_by;
     if (code?.startsWith("c")) {
       await sql`update as_ref_links set orders = orders + 1 where user_id = ${uid} and code = ${code}`;
+      await trackRefEvent(sql, uid, code, "order", data.telegramId ?? null);
+    } else if (code) {
+      await trackRefEvent(sql, uid, code, "order", data.telegramId ?? null);
     }
   } catch { /* ignore */ }
   return { id, publicNo, status: "waiting_admin" as const, price };

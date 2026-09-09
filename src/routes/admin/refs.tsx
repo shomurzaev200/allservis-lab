@@ -36,6 +36,7 @@ function RefsPage() {
         <p className="mt-2 text-sm text-muted">
           У каждого клиента своя ссылка в боте (кнопка «Друзья» или /ref). Здесь — кампании: Instagram, Telegram, флаеры.
           Клики / входы / заявки показывают, откуда идёт трафик.
+          Полная воронка, UTM и Telegram — в разделе <a href="/admin/targetolog" className="text-accent underline">Таргетолог</a>.
         </p>
       </div>
 

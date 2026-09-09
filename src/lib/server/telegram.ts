@@ -5,6 +5,7 @@ import { emptyDraft, reduceBot, statusReply, clientMenu, liveMenu, masterMenu, l
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
+import { trackRefEvent } from "./refs";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number };
@@ -107,7 +108,7 @@ const EVENT_HEAD: Record<string, string> = {
 const ORDER_CARD_SQL = `
   select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.address,
          o.lat, o.lng, o.comment, o.price, o.master_payout, o.created_at, o.master_id,
-         c.name as client_name, c.telegram_id as client_tg,
+         c.name as client_name, c.telegram_id as client_tg, c.referred_by, c.ref_source,
          m.telegram_id as master_tg, m.first_name, m.last_name, m.phone as master_phone,
          m.rating, m.specialization
   from as_orders o
@@ -137,6 +138,9 @@ function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "c
     `👤 Клиент: <b>${escHtml(String(o.client_name ?? "—"))}</b>`,
     o.client_tg ? `📱 Telegram: <code>${escHtml(String(o.client_tg))}</code>` : "",
     `📞 Телефон: <code>${escHtml(String(o.phone ?? "—"))}</code>`,
+    o.ref_source || o.referred_by
+      ? `🎯 Источник: ${escHtml(String(o.ref_source || "ссылка"))}${o.referred_by ? ` · <code>${escHtml(String(o.referred_by))}</code>` : ""}`
+      : "",
     `🏙 Район: ${escHtml(dist)}`,
     o.address && String(o.address) && String(o.address) !== distRaw ? `🏠 Адрес: ${escHtml(String(o.address))}` : "",
     geoOk ? `🗺 Гео: <code>${lat!.toFixed(5)}, ${lng!.toFixed(5)}</code>` : "🗺 Гео: не указано",
@@ -909,6 +913,101 @@ export async function sanitizeAlertRouting(sql: Sql, userId: string) {
   await collectAlertRoutes(sql, userId);
 }
 
+export type TgHealthCheck = { key: string; ok: boolean; detail: string };
+
+export async function probeTelegramHealth(sql: Sql, userId: string): Promise<{
+  checks: TgHealthCheck[];
+  openMembers: number | null;
+  botUsername: string;
+}> {
+  const checks: TgHealthCheck[] = [];
+  const ws = await sql<{
+    bot_token: string | null; bot_username: string | null;
+    channel_username: string | null; alerts_channel_id: string | null;
+  }>`
+    select bot_token, bot_username, channel_username, alerts_channel_id from as_workspace where user_id = ${userId}
+  `;
+  const token = (ws[0]?.bot_token ?? "").trim();
+  let botUsername = ws[0]?.bot_username ?? "";
+  let botId = 0;
+  if (!token) {
+    checks.push({ key: "bot", ok: false, detail: "Нет токена основного бота" });
+    return { checks, openMembers: null, botUsername };
+  }
+  const me = await tg(token, "getMe", {});
+  if (!me.ok || !me.result || Array.isArray(me.result)) {
+    checks.push({ key: "bot", ok: false, detail: me.description ?? "Telegram не принял токен" });
+    return { checks, openMembers: null, botUsername };
+  }
+  const r = me.result as { id?: number; username?: string };
+  botId = Number(r.id ?? 0);
+  botUsername = r.username ? `@${r.username}` : botUsername;
+  checks.push({ key: "bot", ok: true, detail: `${botUsername} · API ок` });
+
+  const openRaw = (ws[0]?.channel_username ?? "").trim();
+  let openMembers: number | null = null;
+  if (!openRaw) {
+    checks.push({ key: "open", ok: false, detail: "Открытый канал подписки не указан" });
+  } else {
+    let openOk = false;
+    let openDetail = "канал не найден — добавьте бота админом открытого канала";
+    for (const ref of chatIdVariants(openRaw).concat([openRaw.startsWith("@") ? openRaw : `@${openRaw}`])) {
+      const chat = await tg(token, "getChat", { chat_id: ref });
+      if (!chat.ok || !chat.result || Array.isArray(chat.result)) {
+        openDetail = chat.description ?? openDetail;
+        continue;
+      }
+      const info = chat.result as { id?: number; username?: string; title?: string };
+      const member = await tg(token, "getChatMember", { chat_id: info.id ?? ref, user_id: botId });
+      const st = member.ok && member.result && !Array.isArray(member.result)
+        ? String((member.result as { status?: string }).status ?? "")
+        : "";
+      const canCheck = st === "administrator" || st === "creator";
+      const cnt = await tg(token, "getChatMemberCount", { chat_id: info.id ?? ref });
+      if (cnt.ok && typeof cnt.result === "number") openMembers = cnt.result;
+      openOk = canCheck;
+      openDetail = canCheck
+        ? `${info.title || info.username || ref} · бот админ${openMembers != null ? ` · ${openMembers} подписчиков` : ""}`
+        : `${info.title || ref}: бот не админ (нужно для проверки подписки)`;
+      break;
+    }
+    checks.push({ key: "open", ok: openOk, detail: openDetail });
+  }
+
+  const closedRaw = (ws[0]?.alerts_channel_id ?? "").trim();
+  if (!closedRaw) {
+    checks.push({ key: "closed", ok: false, detail: "Закрытый канал отчётов не привязан. Перешлите боту пост из него." });
+  } else {
+    let closedOk = false;
+    let closedDetail = "chat not found — бот не состоит в канале";
+    for (const ref of chatIdVariants(closedRaw)) {
+      const chat = await tg(token, "getChat", { chat_id: ref });
+      if (!chat.ok || !chat.result || Array.isArray(chat.result)) {
+        closedDetail = chat.description ?? closedDetail;
+        continue;
+      }
+      const info = chat.result as { id?: number; title?: string; username?: string };
+      if (info.username) {
+        closedOk = false;
+        closedDetail = `Это публичный @${info.username} — алерты сюда не пишем. Нужен закрытый канал без @username.`;
+        break;
+      }
+      const member = await tg(token, "getChatMember", { chat_id: info.id ?? ref, user_id: botId });
+      const st = member.ok && member.result && !Array.isArray(member.result)
+        ? String((member.result as { status?: string }).status ?? "")
+        : "";
+      const canPost = st === "administrator" || st === "creator";
+      closedOk = canPost;
+      closedDetail = canPost
+        ? `${info.title || info.id} · бот может писать отчёты`
+        : `${info.title || info.id}: бот в канале, но без права публикации`;
+      break;
+    }
+    checks.push({ key: "closed", ok: closedOk, detail: closedDetail });
+  }
+  return { checks, openMembers, botUsername };
+}
+
 async function sendToAlerts(token: string, chat: string, text: string, extra: Record<string, unknown> = {}): Promise<{ ok: boolean; description?: string; used?: string }> {
   const variants = chatIdVariants(chat);
   let last: { ok: boolean; description?: string; used?: string } = { ok: false, description: "не отправлено" };
@@ -1387,26 +1486,27 @@ async function clientMustSubscribe(
   return { block: true, url: url || `https://t.me/${parsed.username}`, label };
 }
 
-async function sendSubscribePrompt(token: string, chatId: string, cbId: string | undefined, url: string, label: string, fromStart = false) {
+async function sendSubscribePrompt(token: string, chatId: string, cbId: string | undefined, url: string, label: string, fromStart = false, custom?: string) {
   if (cbId && !fromStart) {
     await tg(token, "answerCallbackQuery", { callback_query_id: cbId, text: "Сначала подпишитесь на канал", show_alert: true });
   } else if (cbId) {
     await tg(token, "answerCallbackQuery", { callback_query_id: cbId });
   }
   const buttons: { text: string; url?: string; callback_data?: string }[][] = [];
-  if (url) buttons.push([{ text: `📢 Открыть ${label}`, url }]);
+  if (url) buttons.push([{ text: `📢 Подписаться на ${label}`, url }]);
   buttons.push([{ text: "✅ Я подписался", callback_data: "sub:ok" }]);
+  const fallback = [
+    "🔒 Доступ закрыт",
+    "",
+    `Чтобы продолжить, подпишитесь на ${label}.`,
+    `Davom etish uchun ${label} kanaliga obuna bo‘ling.`,
+    "",
+    "1) Нажмите «Подписаться»",
+    "2) Вернитесь и нажмите «Я подписался»",
+  ].join("\n");
   await tg(token, "sendMessage", {
     chat_id: Number(chatId),
-    text: [
-      "All Servis — вызов мастера на дом в Ташкенте.",
-      "",
-      `Чтобы начать, подпишитесь на ${label}.`,
-      `Boshlash uchun ${label} kanaliga obuna bo‘ling.`,
-      "",
-      "1) Нажмите «Открыть» и подпишитесь",
-      "2) Вернитесь в бота и нажмите «Я подписался»",
-    ].join("\n"),
+    text: (custom ?? "").trim() || fallback,
     reply_markup: { inline_keyboard: buttons },
     disable_web_page_preview: true,
   });
@@ -1429,7 +1529,12 @@ async function gated(
     const sub = await clientMustSubscribe(sql, uid, token, from.id);
     if (sub.block) {
       const fromStart = Boolean(msg?.text?.startsWith("/start") || cb?.data === "sub:ok");
-      await sendSubscribePrompt(token, chatId, cb?.id, sub.url, sub.label, fromStart);
+      let prompt = "";
+      try {
+        const pr = await sql<{ subscribe_prompt: string | null }>`select subscribe_prompt from as_workspace where user_id = ${uid}`;
+        prompt = pr[0]?.subscribe_prompt ?? "";
+      } catch { /* ignore */ }
+      await sendSubscribePrompt(token, chatId, cb?.id, sub.url, sub.label, fromStart, prompt);
       return true;
     }
   }
@@ -1551,9 +1656,11 @@ async function applyStartPayload(sql: Sql, uid: string, chatId: string, payload:
           where user_id = ${uid} and telegram_id = ${chatId}
             and (referred_by is null or referred_by = '')
         `;
+        await trackRefEvent(sql, uid, p, "join", chatId);
       }
     } else if (p.startsWith("c")) {
       await sql`update as_ref_links set clicks = clicks + 1 where user_id = ${uid} and code = ${p}`;
+      await trackRefEvent(sql, uid, p, "click", chatId);
       const src = await sql<{ source: string }>`select source from as_ref_links where user_id = ${uid} and code = ${p} limit 1`;
       if (src[0]) {
         const joined = await sql<{ id: number }>`
@@ -1566,6 +1673,7 @@ async function applyStartPayload(sql: Sql, uid: string, chatId: string, payload:
         `;
         if (joined[0]) {
           await sql`update as_ref_links set joins = joins + 1 where user_id = ${uid} and code = ${p}`;
+          await trackRefEvent(sql, uid, p, "join", chatId);
         }
       }
     }
@@ -1885,6 +1993,14 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Клиент Telegram";
 
   if (await gated(sql, uid, token, chatId, from, msg, cb)) return { ok: true };
+  if (cb?.data === "sub:ok") {
+    try {
+      const cl = await sql<{ referred_by: string | null }>`
+        select referred_by from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+      `;
+      await trackRefEvent(sql, uid, cl[0]?.referred_by || "", "subscribe", chatId);
+    } catch { /* ignore */ }
+  }
 
   if (cb?.data?.startsWith("j:")) {
     await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
@@ -2013,6 +2129,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     event = { type: "text", text: msg.text };
     if (msg.text.startsWith("/start")) {
       const payload = msg.text.slice(6).trim();
+      await trackRefEvent(sql, uid, payload, "start", chatId);
       if (payload) {
         await persistProfile(sql, uid, chatId, name, draft);
         await applyStartPayload(sql, uid, chatId, payload);

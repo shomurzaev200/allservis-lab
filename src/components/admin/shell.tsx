@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Bell, ClipboardList, CreditCard, LayoutDashboard, Map, Menu, MessageCircle, ScrollText, Settings, Share2, Star, Users, Wallet, Wrench, X } from "lucide-react";
+import { Bell, ClipboardList, CreditCard, LayoutDashboard, Map, Menu, MessageCircle, ScrollText, Settings, Share2, Star, Target, Users, Wallet, Wrench, X } from "lucide-react";
 import { UserButton } from "@/lib/auth/gates";
 import { cn } from "@/lib/utils";
 import { useAccess, type PermKey } from "./access";
@@ -12,6 +12,7 @@ const NAV: { to: string; label: string; icon: typeof LayoutDashboard; perm?: Per
   { to: "/admin/clients", label: "Клиенты", icon: Users },
   { to: "/admin/map", label: "Карта", icon: Map },
   { to: "/admin/analytics", label: "Аналитика", icon: LayoutDashboard },
+  { to: "/admin/targetolog", label: "Таргетолог", icon: Target },
   { to: "/admin/refs", label: "Рефералы", icon: Share2 },
   { to: "/admin/finance", label: "Финансы", icon: Wallet, perm: "finance" },
   { to: "/admin/payments", label: "Пополнения", icon: CreditCard, perm: "finance" },

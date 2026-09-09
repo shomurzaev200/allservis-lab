@@ -1,20 +1,22 @@
 [Unit]
 Description=All Servis
 After=network.target postgresql.service
-StartLimitBurst=8
-StartLimitIntervalSec=60
+StartLimitBurst=12
+StartLimitIntervalSec=120
 
 [Service]
 Type=simple
 User=ubuntu
-WorkingDirectory=/home/ubuntu/fjord-acre-sky-solar
-EnvironmentFile=-/home/ubuntu/fjord-acre-sky-solar/.env
+WorkingDirectory=/opt/allservis
+EnvironmentFile=-/opt/allservis/.env
 Environment=NODE_ENV=development
-Environment=PATH=/home/ubuntu/fjord-acre-sky-solar/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/opt/allservis/node_modules/.bin:/usr/local/bin:/usr/bin:/bin
 ExecStartPre=/usr/bin/node scripts/migrate.mjs
 ExecStart=/usr/bin/node scripts/with-app-env.mjs ./node_modules/.bin/vite dev --host 0.0.0.0 --port 8080
-Restart=on-failure
+Restart=always
 RestartSec=5
+KillMode=mixed
+TimeoutStopSec=20
 
 [Install]
 WantedBy=multi-user.target
