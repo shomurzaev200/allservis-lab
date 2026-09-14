@@ -451,6 +451,7 @@ export function labelToTapId(raw: string): string | null {
   if (q.includes("доступн") || q.startsWith("⚡") || q.includes("buyurtma") && !q.includes("usta")) return "cmd:jobs";
   if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
   if (q.includes("стать мастером") || q.includes("usta bo") || q === "мастер") return "cmd:become";
+  if (q.includes("начать регистрац") || q.includes("регистрацию") || q.includes("ro'yxatdan") || q.includes("royxatdan")) return "role:master";
   if (q.includes("профиль") || q.includes("profil")) return "cmd:profile";
   if (q.includes("баланс") || q.includes("balans")) return "cmd:balance";
   if (q.includes("цены") || q.includes("narxlar") || q.includes("narx va")) return "cmd:prices";
@@ -651,7 +652,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (role === "master") {
       return {
         userMessage: user(t(lang, "master")),
-        replies: [bot(t(lang, "masterSpec"), { buttons: categoryKeys(lang) })],
+        replies: [bot(t(lang, "masterSpec"), { buttons: categoryPickKeys(lang) })],
         step: "master_spec",
         draft: d,
       };
@@ -818,7 +819,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (!svc) {
       return {
         userMessage: user(raw),
-        replies: [bot(t(lang, "masterSpec"), { buttons: categoryKeys(lang) })],
+        replies: [bot(t(lang, "masterSpec"), { buttons: categoryPickKeys(lang) })],
         step: "master_spec",
         draft,
       };

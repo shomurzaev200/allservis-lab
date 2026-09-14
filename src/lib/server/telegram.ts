@@ -7,7 +7,7 @@ import { insertOrder } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
 import { trackRefEvent } from "./refs";
 import { formatGeoCard, isInsideServiceArea, isTashkentDistrictName, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
-import { displayArea, formatClientHome, formatHowTo, formatOpError, HR, statusLine, svcTitle } from "@/lib/tg-ui";
+import { displayArea, formatBecomeMaster, formatClientHome, formatHowTo, formatOpError, HR, statusLine, svcTitle } from "@/lib/tg-ui";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number };
@@ -2505,6 +2505,50 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     await sendClientProfile(sql, uid, token, chatId, lang, live);
     return { ok: true };
   }
+  if (tapGuess === "cmd:become" || tapGuess === "role:master") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    if (masterExists[0]) {
+      const next = { ...draft, role: "master" as const };
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${"idle"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${"idle"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+      `;
+      await handleMasterMenu(sql, uid, token, chatId, "cmd:jobs");
+      return { ok: true };
+    }
+    if (tapGuess === "cmd:become") {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: lang === "uz" ? formatBecomeMaster("uz") : formatBecomeMaster("ru"),
+        reply_markup: markup([
+          [{ id: "role:master", label: lang === "uz" ? "👨‍🔧 Ro‘yxatdan o‘tish" : "👨‍🔧 Начать регистрацию" }],
+          [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
+        ]),
+      });
+      return { ok: true };
+    }
+    const next = { ...draft, role: "master" as const };
+    await sql`
+      insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+      values (${uid}, ${chatId}, ${"master_spec"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"master_spec"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+    `;
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: lang === "uz"
+        ? "👨‍🔧 RO‘YXATDAN O‘TISH\n\nQaysi mutaxassislik? Tugmani bosing."
+        : "👨‍🔧 РЕГИСТРАЦИЯ МАСТЕРА\n\nКакая специальность? Нажмите кнопку услуги.",
+      reply_markup: markup([
+        [{ id: "svc:plumb", label: lang === "uz" ? "🚰 Santexnik" : "🚰 Сантехник" }, { id: "svc:elec", label: lang === "uz" ? "🔌 Elektrik" : "🔌 Электрик" }],
+        [{ id: "svc:ac", label: lang === "uz" ? "❄️ Konditsioner" : "❄️ Кондиционер" }, { id: "svc:appliance", label: lang === "uz" ? "📺 Texnika" : "📺 Бытовая техника" }],
+        [{ id: "svc:furniture", label: lang === "uz" ? "🪚 Mebel" : "🪚 Сборка мебели" }, { id: "svc:lock", label: lang === "uz" ? "🔑 Quflar" : "🔑 Замки и двери" }],
+        [{ id: "svc:paint", label: lang === "uz" ? "🎨 Bo‘yoqchi" : "🎨 Маляр" }, { id: "svc:other", label: lang === "uz" ? "🏠 Boshqa" : "🏠 Другое" }],
+        [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
+      ]),
+    });
+    return { ok: true };
+  }
   if (tapGuess === "cmd:help") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     await tg(token, "sendMessage", {
@@ -2517,9 +2561,21 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     });
     return { ok: true };
   }
-  if ((tapGuess === "cmd:menu" || msg?.text === "/start") && !live && draft.role !== "master") {
+  if ((tapGuess === "cmd:menu" || msg?.text === "/start") && !live) {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    try { await persistProfile(sql, uid, chatId, name, draft); } catch { /* ignore */ }
+    if (masterExists[0] && (draft.role === "master" || tapGuess === "cmd:menu" && step === "idle")) {
+      const next = { ...draft, role: "master" as const };
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${"idle"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${"idle"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+      `;
+      if (draft.role === "master") {
+        await handleMasterMenu(sql, uid, token, chatId, "cmd:jobs");
+        return { ok: true };
+      }
+    }
+    try { await persistProfile(sql, uid, chatId, name, { ...draft, role: "client" }); } catch { /* ignore */ }
     try {
       await sendHome(sql, uid, token, chatId, name, lang, false);
     } catch {
@@ -2532,8 +2588,8 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     try {
       await sql`
         insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
-        values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
-        on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, tg_name = ${name}, updated_at = now()
+        values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify({ ...draft, role: "client", photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify({ ...draft, role: "client", photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, tg_name = ${name}, updated_at = now()
       `;
     } catch { /* ignore */ }
     return { ok: true };
@@ -2608,28 +2664,38 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       districtId: geo.inside ? "bekabad" : undefined,
     };
     const card = formatGeoCard(geo, lang);
-    const geoBtns = geo.inside
-      ? [
-          [{ id: "geo:ok", label: lang === "uz" ? "✅ Hammasi to‘g‘ri" : "✅ Всё верно" }],
-          [{ id: "geo:new", label: lang === "uz" ? "📍 Boshqa lokatsiya" : "📍 Другая локация", requestLocation: true }],
-          [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
-        ]
-      : [
-          [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
-        ];
-    if (result.replies[0]) result.replies[0] = { ...result.replies[0], text: card, buttons: geoBtns };
-    else result.replies.push({ id: "geo-card", from: "bot", text: card, time: "", buttons: geoBtns });
-    if (!geo.inside) step = draft.role === "master" ? "master_geo" : "district";
-    else if (draft.role !== "master") step = "geo";
+    const masterFlow = result.registerMaster || step === "master_geo" || draft.role === "master";
+    if (!masterFlow) {
+      const geoBtns = geo.inside
+        ? [
+            [{ id: "geo:ok", label: lang === "uz" ? "✅ Hammasi to‘g‘ri" : "✅ Всё верно" }],
+            [{ id: "geo:new", label: lang === "uz" ? "📍 Boshqa lokatsiya" : "📍 Другая локация", requestLocation: true }],
+            [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
+          ]
+        : [
+            [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+          ];
+      if (result.replies[0]) result.replies[0] = { ...result.replies[0], text: card, buttons: geoBtns };
+      else result.replies.push({ id: "geo-card", from: "bot", text: card, time: "", buttons: geoBtns });
+      if (!geo.inside) step = "district";
+      else step = "geo";
+    } else if (!geo.inside) {
+      step = "master_geo";
+      if (result.replies[0]) result.replies[0] = { ...result.replies[0], text: card };
+    }
   }
 
   await persistProfile(sql, uid, chatId, name, draft);
 
   if (result.registerMaster) {
+    draft = { ...draft, role: "master" };
     await upsertMasterFromBot(sql, uid, chatId, name, draft);
+    try { await persistProfile(sql, uid, chatId, name, draft); } catch { /* ignore */ }
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
-      text: "Меню мастера. Заявки приходят сюда, когда администратор назначит вас.",
+      text: lang === "uz"
+        ? "✅ Profil saqlandi. Online/offline — tugmalar orqali."
+        : "✅ Профиль мастера сохранён. Онлайн/офлайн — кнопками. Админ видит вас в панели.",
       reply_markup: markup(masterMenu(draft.lang, true)),
     });
   }
