@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { createOrder, pollOrder, rateOrder } from "@/lib/server/api";
 import { emptyDraft, reduceBot, statusReply, welcomeMessages } from "@/lib/bot";
-import { districtById, serviceById } from "@/lib/catalog";
+import { serviceById } from "@/lib/catalog";
 import type { ChatMessage, ChatStep, Draft, LiveOrder } from "@/lib/types";
 import type { OrderStatus } from "@/lib/domain";
 
@@ -51,9 +51,8 @@ function enqueue(get: () => State, set: (p: Partial<State>) => void, replies: Ch
 }
 
 async function submitDraft(get: () => State, set: (p: Partial<State>) => void, draft: Draft) {
-  const dist = draft.districtId ? districtById(draft.districtId) : undefined;
   const svc = draft.serviceId ? serviceById(draft.serviceId) : undefined;
-  if (!dist || !svc || !draft.problem || !draft.phone) return;
+  if (!svc || !draft.problem || !draft.phone || draft.lat == null || draft.lng == null) return;
   try {
     const res = await createOrder({
       data: {
@@ -61,11 +60,14 @@ async function submitDraft(get: () => State, set: (p: Partial<State>) => void, d
         phone: draft.phone,
         category: svc.id,
         description: draft.problem,
-        district: dist.title,
-        lat: draft.lat ?? dist.lat,
-        lng: draft.lng ?? dist.lng,
+        district: draft.neighborhood || draft.city || "Бекабад",
+        lat: draft.lat,
+        lng: draft.lng,
         comment: draft.comment,
         photos: draft.photos,
+        city: draft.city,
+        address: draft.fullAddress,
+        neighborhood: draft.neighborhood,
       },
     });
     set({

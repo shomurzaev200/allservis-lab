@@ -83,7 +83,13 @@ function OrderPage() {
           <p className="mt-1 text-sm leading-relaxed">{o.description}</p>
           {o.comment ? <p className="mt-2 text-sm text-muted">Комментарий: {o.comment}</p> : null}
           <p className="mt-2 text-xs text-muted">
-            {o.address} · {o.lat?.toFixed(4)}, {o.lng?.toFixed(4)}
+            🏙 {o.city || "Бекабад"}
+            <br />
+            📍 Район/махалля: {o.district || "не определён"}
+            <br />
+            🏠 {o.address || "не определён"}
+            <br />
+            📍 {o.lat?.toFixed(5)}, {o.lng?.toFixed(5)}
           </p>
           <p className="mt-2 font-mono text-xs">{formatSum(o.price)}</p>
           {photos.length ? (

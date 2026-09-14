@@ -6,11 +6,12 @@ import { OnlineDot, OrderBadge } from "./status-badge";
 import { serviceById } from "@/lib/catalog";
 import { DISTRICTS } from "@/lib/catalog";
 import { cn } from "@/lib/utils";
+import { isInsideServiceArea, SERVICE_CITY } from "@/lib/geo";
 
-const SOUTH = 41.2;
-const NORTH = 41.4;
-const WEST = 69.14;
-const EAST = 69.38;
+const SOUTH = 40.175;
+const NORTH = 40.265;
+const WEST = 69.195;
+const EAST = 69.340;
 
 function xy(lat: number, lng: number) {
   const x = ((lng - WEST) / (EAST - WEST)) * 100;
@@ -44,12 +45,12 @@ export function MapCanvas({
     <div className="grid gap-4 xl:grid-cols-[1fr_22rem]">
       <div className="relative min-h-[32rem] overflow-hidden rounded-xl border border-border bg-surface">
         <iframe
-          title="Ташкент"
+          title={SERVICE_CITY}
           className="pointer-events-none absolute inset-0 size-full opacity-55 grayscale contrast-125"
           src={`https://www.openstreetmap.org/export/embed.html?bbox=${WEST}%2C${SOUTH}%2C${EAST}%2C${NORTH}&layer=mapnik`}
         />
         <div className="absolute inset-0 bg-bg/35" />
-        <p className="absolute left-3 top-3 z-10 font-mono text-xs text-accent">TASHKENT · OSM LIVE</p>
+        <p className="absolute left-3 top-3 z-10 font-mono text-xs text-accent">БЕКАБАД · OSM LIVE</p>
         <svg className="absolute inset-0 z-[1] size-full" viewBox="0 0 100 100" preserveAspectRatio="none">
           {lines.map((l) => (
             <line key={l.o.id} x1={l.a.x} y1={l.a.y} x2={l.b.x} y2={l.b.y} stroke="rgb(34 211 238 / 0.7)" strokeWidth="0.4" />
@@ -69,6 +70,7 @@ export function MapCanvas({
         })}
         {orders.map((o) => {
           if (o.lat == null || o.lng == null) return null;
+          if (!isInsideServiceArea(o.lat, o.lng)) return null;
           const p = xy(o.lat, o.lng);
           const wait = o.status === "waiting_admin" || o.status === "master_rejected";
           return (
@@ -87,6 +89,7 @@ export function MapCanvas({
         })}
         {masters.map((m) => {
           if (m.lat == null || m.lng == null) return null;
+          if (!isInsideServiceArea(m.lat, m.lng)) return null;
           const p = xy(m.lat, m.lng);
           const color =
             m.online_status === "online"

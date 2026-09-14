@@ -47,6 +47,10 @@ export type Draft = {
   problem?: string;
   photos: string[];
   districtId?: string;
+  city?: string;
+  neighborhood?: string;
+  street?: string;
+  fullAddress?: string;
   lat?: number;
   lng?: number;
   phone?: string;

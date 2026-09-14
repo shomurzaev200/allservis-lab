@@ -1,6 +1,7 @@
 import { SERVICES, serviceById } from "@/lib/catalog";
 import { addAudit, addEvent, addNote, type Sql } from "./workspace";
 import { trackRefEvent } from "./refs";
+import { isInsideServiceArea, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
 
 export type CreateOrderInput = {
   name: string;
@@ -13,6 +14,9 @@ export type CreateOrderInput = {
   comment?: string;
   photos?: string[];
   telegramId?: string;
+  city?: string;
+  address?: string;
+  neighborhood?: string;
 };
 
 function n(v: unknown): number {
@@ -21,6 +25,21 @@ function n(v: unknown): number {
 }
 
 export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput) {
+  const lat = n(data.lat);
+  const lng = n(data.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isInsideServiceArea(lat, lng)) {
+    throw new Error(OUTSIDE_SERVICE_AREA);
+  }
+  const geo = await resolveLocation(lat, lng);
+  if (!geo.inside) throw new Error(OUTSIDE_SERVICE_AREA);
+  const city = SERVICE_CITY;
+  const neighborhood = (data.neighborhood || geo.neighborhood || geo.district || "").trim();
+  const district = (neighborhood || data.district || city).trim();
+  const safeDistrict = /ташкент|toshkent|tashkent|чиланзар|chilonzor|мирабад|mirobod|яккасарай|yakkasaroy|юнусабад|yunusobod|мирзо|шайхантах|алмазар|учтепа|сергели|яшнабад|бектемир/i.test(district)
+    ? (neighborhood && !/ташкент|чиланзар|мирабад|яккасарай/i.test(neighborhood) ? neighborhood : city)
+    : district;
+  const address = (data.address || geo.fullAddress || `${city}${safeDistrict && safeDistrict !== city ? ", " + safeDistrict : ""}`).trim();
+
   const svc = serviceById(data.category) ?? SERVICES[0]!;
   const tg = data.telegramId ?? "";
   let client = await sql<{ id: number }>`
@@ -31,7 +50,7 @@ export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput)
   if (!client[0]) {
     client = await sql<{ id: number }>`
       insert into as_clients (user_id, telegram_id, name, phone, city, district, lat, lng)
-      values (${uid}, ${data.telegramId && data.telegramId.length >= 8 ? data.telegramId : null}, ${data.name}, ${data.phone}, ${"Ташкент"}, ${data.district}, ${data.lat}, ${data.lng})
+      values (${uid}, ${data.telegramId && data.telegramId.length >= 8 ? data.telegramId : null}, ${data.name}, ${data.phone}, ${city}, ${safeDistrict}, ${lat}, ${lng})
       returning id
     `;
   } else if (data.telegramId) {
@@ -51,8 +70,8 @@ export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput)
       user_id, public_no, client_id, category_slug, description, phone, city, district, address,
       lat, lng, status, photos, comment, price, master_payout
     ) values (
-      ${uid}, ${publicNo}, ${clientId}, ${svc.id}, ${data.description}, ${data.phone}, ${"Ташкент"},
-      ${data.district}, ${data.district}, ${data.lat}, ${data.lng}, ${"waiting_admin"}, ${photos},
+      ${uid}, ${publicNo}, ${clientId}, ${svc.id}, ${data.description}, ${data.phone}, ${city},
+      ${safeDistrict}, ${address}, ${lat}, ${lng}, ${"waiting_admin"}, ${photos},
       ${data.comment ?? ""}, ${price}, ${Math.round(price * 0.7)}
     ) returning id
   `;

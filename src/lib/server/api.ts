@@ -3,6 +3,7 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
+import { isInsideServiceArea } from "@/lib/geo";
 import { addAudit, addEvent, addNote, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
 import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting } from "./telegram";
@@ -344,15 +345,16 @@ export const candidatesForOrder = createServerFn({ method: "GET" })
     const { sql, uid, actor } = await ctxSql(context.userId);
     await tickPresence(sql, uid);
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${orderId}`;
-    if (!o[0]) return { error: "ORDER_NOT_FOUND" as const, masters: [] as (MasterRow & { km: number | null; recommended: boolean })[] };
+    if (!o[0]) return { error: "ORDER_NOT_FOUND" as const, masters: [] as (MasterRow & { km: number | null; recommended: boolean; inZone: boolean })[] };
     const masters = await listMastersInner(sql, uid);
     const olat = o[0].lat == null ? null : n(o[0].lat);
     const olng = o[0].lng == null ? null : n(o[0].lng);
     const spec = String(o[0].category_slug);
     const scored = masters.map((m) => {
       const km = olat != null && olng != null && m.lat != null && m.lng != null ? haversineKm(olat, olng, m.lat, m.lng) : null;
-      const recommended = m.specialization === spec && m.online_status !== "offline" && m.online_status !== "blocked" && m.active_orders < 3;
-      return { ...m, km, recommended };
+      const inZone = m.lat != null && m.lng != null ? isInsideServiceArea(m.lat, m.lng) : false;
+      const recommended = inZone && m.specialization === spec && m.online_status !== "offline" && m.online_status !== "blocked" && m.active_orders < 3;
+      return { ...m, km, recommended, inZone };
     });
     scored.sort((a, b) => {
       if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;

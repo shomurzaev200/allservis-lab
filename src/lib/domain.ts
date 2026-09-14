@@ -48,17 +48,7 @@ export const ACTIVE_ORDER: OrderStatus[] = [
 export const ASSIGNABLE: OrderStatus[] = ["waiting_admin", "master_rejected", "assigned"];
 
 export const DISTRICT_COORDS: Record<string, { lat: number; lng: number; title: string }> = {
-  chilanzar: { lat: 41.277, lng: 69.215, title: "Чиланзар" },
-  yunusabad: { lat: 41.365, lng: 69.289, title: "Юнусабад" },
-  mirzo: { lat: 41.327, lng: 69.334, title: "Мирзо-Улугбек" },
-  yakkasaray: { lat: 41.289, lng: 69.256, title: "Яккасарай" },
-  mirabad: { lat: 41.297, lng: 69.277, title: "Мирабад" },
-  shayhantahur: { lat: 41.318, lng: 69.236, title: "Шайхантахур" },
-  almazar: { lat: 41.362, lng: 69.209, title: "Алмазар" },
-  uchtepa: { lat: 41.296, lng: 69.176, title: "Учтепа" },
-  sergeli: { lat: 41.226, lng: 69.219, title: "Сергели" },
-  yashnabad: { lat: 41.307, lng: 69.334, title: "Яшнабад" },
-  bektemir: { lat: 41.243, lng: 69.334, title: "Бектемир" },
+  bekabad: { lat: 40.2206, lng: 69.2697, title: "Бекабад" },
 };
 
 export function haversineKm(aLat: number, aLng: number, bLat: number, bLng: number): number {

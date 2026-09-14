@@ -36,7 +36,7 @@ function MasterCard() {
       <div className="flex items-start justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl">{m.first_name} {m.last_name}</h1>
-          <p className="text-sm text-muted">{serviceById(m.specialization)?.title} · {m.district}</p>
+          <p className="text-sm text-muted">{serviceById(m.specialization)?.title} · {m.city || "Бекабад"} · {m.district || "махалля не определена"}</p>
           <p className="mt-1 font-mono text-xs text-subtle">TG {m.telegram_id} · {m.phone}</p>
         </div>
         <OnlineDot status={m.online_status} />

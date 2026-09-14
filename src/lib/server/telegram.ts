@@ -6,6 +6,7 @@ import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
 import { trackRefEvent } from "./refs";
+import { formatGeoCard, isInsideServiceArea, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number };
@@ -106,7 +107,7 @@ const EVENT_HEAD: Record<string, string> = {
 };
 
 const ORDER_CARD_SQL = `
-  select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.address,
+  select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.address, o.city,
          o.lat, o.lng, o.comment, o.price, o.master_payout, o.created_at, o.master_id,
          c.name as client_name, c.telegram_id as client_tg, c.referred_by, c.ref_source,
          m.telegram_id as master_tg, m.first_name, m.last_name, m.phone as master_phone,
@@ -120,7 +121,7 @@ const ORDER_CARD_SQL = `
 function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "channel" | "master" = "channel", who?: StaffWho): string {
   const svc = serviceById(String(o.category_slug ?? ""));
   const distRaw = String(o.district ?? "");
-  const dist = districtById(distRaw)?.title || distRaw || "—";
+  const dist = distRaw || "не определён";
   const lat = o.lat == null ? null : Number(o.lat);
   const lng = o.lng == null ? null : Number(o.lng);
   const masterName = [o.first_name, o.last_name].filter(Boolean).join(" ").trim();
@@ -138,10 +139,11 @@ function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "c
     `👤 Клиент: <b>${escHtml(String(o.client_name ?? "—"))}</b>`,
     o.client_tg ? `📱 Telegram: <code>${escHtml(String(o.client_tg))}</code>` : "",
     `📞 Телефон: <code>${escHtml(String(o.phone ?? "—"))}</code>`,
+    `🏙 Город: ${escHtml(String(o.city || SERVICE_CITY))}`,
     o.ref_source || o.referred_by
       ? `🎯 Источник: ${escHtml(String(o.ref_source || "ссылка"))}${o.referred_by ? ` · <code>${escHtml(String(o.referred_by))}</code>` : ""}`
       : "",
-    `🏙 Район: ${escHtml(dist)}`,
+    `📍 Район/махалля: ${escHtml(dist)}`,
     o.address && String(o.address) && String(o.address) !== distRaw ? `🏠 Адрес: ${escHtml(String(o.address))}` : "",
     geoOk ? `🗺 Гео: <code>${lat!.toFixed(5)}, ${lng!.toFixed(5)}</code>` : "🗺 Гео: не указано",
     geoOk ? mapsLink(lat, lng) : "",
@@ -432,10 +434,20 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
     return true;
   }
   if (loc) {
-    await sql`update as_masters set lat = ${loc.lat}, lng = ${loc.lng}, last_seen = now() where id = ${m[0].id}`;
+    const geo = await resolveLocation(loc.lat, loc.lng);
+    if (!geo.inside) {
+      await sql`update as_masters set lat = ${loc.lat}, lng = ${loc.lng}, city = ${"вне зоны"}, last_seen = now(), online_status = case when online_status = 'blocked' then online_status else 'offline' end where id = ${m[0].id}`;
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: `${formatGeoCard(geo, "ru")}\n\n⚠️ Вы находитесь за пределами рабочей зоны ALL SERVIS.\nРабочая зона: 📍 Бекабад`,
+        reply_markup: markup(masterMenu("ru", false)),
+      });
+      return true;
+    }
+    await sql`update as_masters set lat = ${loc.lat}, lng = ${loc.lng}, city = ${SERVICE_CITY}, district = ${geo.neighborhood || geo.district || SERVICE_CITY}, last_seen = now() where id = ${m[0].id}`;
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
-      text: "Локация обновлена. Вы на карте админки.",
+      text: `${formatGeoCard(geo, "ru")}\n\nЛокация обновлена. Вы на карте админки.`,
       reply_markup: markup(masterMenu("ru", online)),
     });
     return true;
@@ -1559,7 +1571,7 @@ async function gated(
   if (!client[0]) {
     await sql`
       insert into as_clients (user_id, telegram_id, name, phone, city, district, rating)
-      values (${uid}, ${chatId}, ${name}, ${""}, ${"Ташкент"}, ${""}, ${5})
+      values (${uid}, ${chatId}, ${name}, ${""}, ${SERVICE_CITY}, ${""}, ${5})
     `;
     client = await sql<{ id: number; paid: boolean; blocked: boolean }>`
       select id, paid, blocked from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
@@ -1684,9 +1696,13 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
   const lang = draft.lang ?? "ru";
   const role = draft.role ?? "client";
   const phone = draft.phone ?? "";
-  const district = draft.districtId ? (districtById(draft.districtId)?.title ?? "") : "";
   const lat = draft.lat ?? null;
   const lng = draft.lng ?? null;
+  const inside = lat != null && lng != null && isInsideServiceArea(Number(lat), Number(lng));
+  const city = inside ? SERVICE_CITY : "";
+  const district = inside
+    ? (draft.neighborhood || draft.fullAddress || districtById(draft.districtId ?? "")?.title || SERVICE_CITY)
+    : (draft.neighborhood || "");
   try {
     const existing = await sql<{ id: number }>`
       select id from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
@@ -1696,6 +1712,7 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
         update as_clients set
           name = ${name},
           phone = coalesce(nullif(${phone}, ''), phone),
+          city = coalesce(nullif(${city}, ''), city),
           district = coalesce(nullif(${district}, ''), district),
           lat = coalesce(${lat}, lat),
           lng = coalesce(${lng}, lng),
@@ -1706,7 +1723,7 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
     } else {
       await sql`
         insert into as_clients (user_id, telegram_id, name, phone, city, district, lat, lng, rating, lang, role)
-        values (${uid}, ${chatId}, ${name}, ${phone}, ${"Ташкент"}, ${district}, ${lat}, ${lng}, ${5}, ${lang}, ${role})
+        values (${uid}, ${chatId}, ${name}, ${phone}, ${city || SERVICE_CITY}, ${district}, ${lat}, ${lng}, ${5}, ${lang}, ${role})
       `;
     }
     await ensureRefCode(sql, uid, chatId);
@@ -1862,17 +1879,21 @@ async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: 
   const last = parts.slice(1).join(" ") || "Telegram";
   const spec = draft.serviceId ?? "other";
   const phone = draft.phone ?? "";
-  const dist = draft.districtId ? districtById(draft.districtId)?.title ?? "" : "";
+  const dist = draft.neighborhood || districtById(draft.districtId ?? "")?.title || SERVICE_CITY;
   const lat = draft.lat ?? null;
   const lng = draft.lng ?? null;
+  const insideMaster = lat != null && lng != null && isInsideServiceArea(Number(lat), Number(lng));
+  const masterCity = insideMaster ? SERVICE_CITY : "";
+  const masterDist = insideMaster ? dist : (draft.neighborhood || "");
   const found = await sql<{ id: number }>`
     select id from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
   `;
   if (found[0]) {
     await sql`
       update as_masters set first_name = ${first}, last_name = ${last}, phone = ${phone},
-        district = ${dist}, specialization = ${spec}, lat = ${lat}, lng = ${lng},
-        online_status = 'online', last_seen = now()
+        district = ${masterDist}, specialization = ${spec}, lat = ${lat}, lng = ${lng},
+        city = ${insideMaster ? SERVICE_CITY : "вне зоны"},
+        online_status = ${insideMaster ? "online" : "offline"}, last_seen = now()
       where id = ${found[0].id}
     `;
   } else {
@@ -1881,8 +1902,8 @@ async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: 
         user_id, first_name, last_name, telegram_id, phone, city, district,
         specialization, online_status, last_seen, lat, lng
       ) values (
-        ${uid}, ${first}, ${last}, ${chatId}, ${phone}, ${"Ташкент"}, ${dist},
-        ${spec}, ${"online"}, now(), ${lat}, ${lng}
+        ${uid}, ${first}, ${last}, ${chatId}, ${phone}, ${masterCity}, ${masterDist},
+        ${spec}, ${insideMaster ? "online" : "offline"}, now(), ${lat}, ${lng}
       )
     `;
   }
@@ -2096,7 +2117,8 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     `;
     const s = saved[0];
     if (s) {
-      const distId = DISTRICTS.find((d) => d.title === s.district)?.id ?? draft.districtId;
+      const distId = DISTRICTS.find((d) => d.title === s.district)?.id
+        ?? ((s.lat != null && s.lng != null && isInsideServiceArea(Number(s.lat), Number(s.lng))) ? "bekabad" : draft.districtId);
       draft = {
         ...draft,
         name: s.name || draft.name,
@@ -2142,6 +2164,24 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const result = reduceBot(step, draft, event);
   step = result.step;
   draft = result.draft;
+
+  if (msg?.location) {
+    const geo = await resolveLocation(msg.location.latitude, msg.location.longitude);
+    draft = {
+      ...draft,
+      lat: geo.lat,
+      lng: geo.lng,
+      city: geo.inside ? SERVICE_CITY : geo.city,
+      neighborhood: geo.inside ? geo.neighborhood : undefined,
+      street: geo.inside ? geo.street : undefined,
+      fullAddress: geo.inside ? geo.fullAddress : undefined,
+      districtId: geo.inside ? "bekabad" : undefined,
+    };
+    const card = formatGeoCard(geo, lang);
+    if (result.replies[0]) result.replies[0] = { ...result.replies[0], text: card };
+    else result.replies.push({ id: "geo-card", from: "bot", text: card, time: "" });
+    if (!geo.inside) step = draft.role === "master" ? "master_geo" : "district";
+  }
 
   await persistProfile(sql, uid, chatId, name, draft);
 
@@ -2189,23 +2229,36 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   }
 
   if (result.submit) {
-    const dist = result.submit.districtId ? districtById(result.submit.districtId) : undefined;
+    const lat = Number(result.submit.lat);
+    const lng = Number(result.submit.lng);
     const svc = result.submit.serviceId ? serviceById(result.submit.serviceId) : undefined;
-    if (dist && svc && result.submit.problem && result.submit.phone) {
+    if (svc && result.submit.problem && result.submit.phone && Number.isFinite(lat) && Number.isFinite(lng)) {
       const sub = await clientMustSubscribe(sql, uid, token, from.id);
       if (sub.block) {
         await sendSubscribePrompt(token, chatId, undefined, sub.url, sub.label);
         return { ok: true };
       }
       try {
+        const geo = await resolveLocation(lat, lng);
+        if (!geo.inside) {
+          await tg(token, "sendMessage", {
+            chat_id: Number(chatId),
+            text: formatGeoCard(geo, lang === "uz" ? "uz" : "ru"),
+            reply_markup: markup(clientMenu(draft.lang)),
+          });
+          return { ok: true };
+        }
         const created = await insertOrder(sql, uid, {
           name,
           phone: result.submit.phone,
           category: svc.id,
           description: result.submit.problem,
-          district: dist.title,
-          lat: result.submit.lat ?? dist.lat,
-          lng: result.submit.lng ?? dist.lng,
+          district: geo.neighborhood || geo.district || SERVICE_CITY,
+          city: SERVICE_CITY,
+          address: geo.fullAddress,
+          neighborhood: geo.neighborhood,
+          lat,
+          lng,
           comment: result.submit.comment,
           photos: result.submit.photos,
           telegramId: chatId,
@@ -2224,6 +2277,10 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       } catch (err) {
         const msgText = err instanceof Error && err.message === "CLIENT_BLOCKED"
           ? "Ваш профиль заблокирован администратором. Новую заявку создать нельзя."
+          : err instanceof Error && err.message === OUTSIDE_SERVICE_AREA
+            ? (lang === "uz"
+              ? "📍 ALL SERVIS hozir faqat Bekobodda ishlaydi."
+              : "📍 ALL SERVIS сейчас работает только в городе Бекабад.")
           : "Не удалось создать заявку. Попробуйте ещё раз.";
         await tg(token, "sendMessage", { chat_id: Number(chatId), text: msgText });
       }

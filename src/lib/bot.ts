@@ -1,8 +1,9 @@
 import { DISTRICTS, matchService, serviceById, type ServiceId } from "./catalog";
 import type { ChatMessage, ChatStep, Draft, KeyboardButton, Lang, UserRole } from "./types";
 import { formatPhone, formatSum, isValidUzPhone, nowTime, uid } from "./utils";
-import { clientLabel, DISTRICT_COORDS } from "./domain";
+import { clientLabel } from "./domain";
 import type { OrderStatus } from "./domain";
+import { isInsideServiceArea, SERVICE_CITY } from "./geo";
 
 export const BOT_NAME = "All Servis";
 export const BOT_HANDLE = "@AllServisBot";
@@ -11,12 +12,12 @@ const STATIC_TIME = "12:40";
 type Dict = Record<string, string>;
 
 const RU: Dict = {
-  pickLang: "All Servis — мастер на дом в Ташкенте.\nВыберите язык / Tilni tanlang.",
+  pickLang: "👋 Добро пожаловать в ALL SERVIS!\n🔧 Вызов мастера на дом\n📍 Мы работаем только в городе Бекабад.\n\nВыберите язык / Tilni tanlang.",
   pickRole: "Кто вы?",
   client: "Я клиент",
   master: "Я мастер",
   welcome:
-    "Заявку видит администратор. Мастера система сама не назначает.\nВыберите услугу или напишите, что случилось.",
+    "📍 Работаем только в Бекабаде.\nЗаявку видит администратор. Мастера система сама не назначает.\nВыберите услугу или напишите, что случилось.",
   help: "🛠 Вызвать мастера — заявка\n📋 Мои заявки — статус\n👤 Профиль — данные и ссылка\n💬 Поддержка — диспетчер",
   cancelDraft: "Черновик сброшен.",
   needService: "Нажмите кнопку или напишите, например: «течёт кран».",
@@ -25,16 +26,17 @@ const RU: Dict = {
   sendPhoto: "Пришлите фото поломки или пропустите — без фото тоже примем.",
   skipPhoto: "Пропустить фото",
   morePhoto: "Фото получил. Ещё одно или отправьте геолокацию.",
-  enoughPhoto: "Три фото достаточно. Отправьте геолокацию или выберите район.",
-  askGeo: "Отправьте точку на карте кнопкой или выберите район.",
+  enoughPhoto: "Три фото достаточно. Отправьте геолокацию — без точки на карте заявку не примем.",
+  askGeo: "📍 Чтобы понять, можем ли мы обслужить адрес, отправьте геолокацию.",
   shareGeo: "📍 Отправить геолокацию",
-  geoOk: "Геолокация записана. Отправьте номер телефона кнопкой.",
-  districtOk: "Район записан. Теперь точная геолокация — или сразу номер.",
-  skipGeo: "Района достаточно",
+  geoOk: "Геолокация в Бекабаде. Отправьте номер телефона кнопкой.",
+  districtOk: "Нужна точная точка на карте — район вручную не принимаем.",
+  skipGeo: "Нужна геолокация",
   keepGeo: "✅ Не менять локацию",
   newGeo: "📍 Отправить новую",
   askKeepGeo: "Локация с прошлого раза. Отправить новую точку или не менять?",
-  pickDistrict: "Выберите район или нажмите «Отправить геолокацию».",
+  pickDistrict: "Нажмите «Отправить геолокацию».",
+  outsideArea: "📍 К сожалению, ALL SERVIS сейчас работает только в городе Бекабад.\nМы пока не работаем в этой территории.",
   sharePhone: "📱 Отправить номер",
   needPhone: "Нажмите «Отправить номер» или введите +998 90 123 45 67.",
   commentAsk: "Комментарий для мастера — или пропустите.",
@@ -53,7 +55,7 @@ const RU: Dict = {
   menu: "Меню",
   masterSpec: "Какая специальность?",
   masterPhone: "Отправьте номер — по нему с вами свяжется диспетчер.",
-  masterGeo: "Отправьте геолокацию — так вы отобразитесь на карте.",
+  masterGeo: "Отправьте геолокацию в Бекабаде — так вы отобразитесь на карте.",
   masterDone: "Профиль мастера сохранён. Онлайн/офлайн — кнопками. Админ видит вас в панели.",
   goOnline: "Я онлайн",
   goOffline: "Я офлайн",
@@ -62,12 +64,12 @@ const RU: Dict = {
 };
 
 const UZ: Dict = {
-  pickLang: "All Servis — Toshkentda uyga usta.\nTilni tanlang / Выберите язык.",
+  pickLang: "👋 ALL SERVIS ga xush kelibsiz!\n🔧 Uyga usta chaqirish\n📍 Hozir faqat Bekobod shahrida ishlaymiz.\n\nTilni tanlang / Выберите язык.",
   pickRole: "Siz kimsiz?",
   client: "Men mijozman",
   master: "Men ustaman",
   welcome:
-    "Arizani administrator ko‘radi. Tizim ustani o‘zi tayinlamaydi.\nXizmatni tanlang yoki nima bo‘lganini yozing.",
+    "📍 Faqat Bekobodda ishlaymiz.\nArizani administrator ko‘radi. Tizim ustani o‘zi tayinlamaydi.\nXizmatni tanlang yoki nima bo‘lganini yozing.",
   help: "🛠 Usta chaqirish — ariza\n📋 Arizalarim — status\n👤 Profil — ma’lumot va havola\n💬 Yordam — dispatcher",
   cancelDraft: "Qoralama tozalandi.",
   needService: "Tugmani bosing yoki yozing, masalan: «kran oqayapti».",
@@ -76,16 +78,17 @@ const UZ: Dict = {
   sendPhoto: "Buzilish fotosini yuboring yoki o‘tkazing.",
   skipPhoto: "Fotosiz davom etish",
   morePhoto: "Foto oldim. Yana yuboring yoki geolokatsiya.",
-  enoughPhoto: "Uchta foto yetarli. Geolokatsiya yoki tuman.",
-  askGeo: "Xaritadan nuqta yuboring yoki tumanni tanlang.",
+  enoughPhoto: "Uchta foto yetarli. Geolokatsiya yuboring — nuqtasiz ariza olmaymiz.",
+  askGeo: "📍 Xizmat ko‘rsata olishimiz uchun geolokatsiyani yuboring.",
   shareGeo: "📍 Geolokatsiya yuborish",
-  geoOk: "Joylashuv yozildi. Telefon raqamini tugma orqali yuboring.",
-  districtOk: "Tuman yozildi. Endi aniq geolokatsiya — yoki raqam.",
-  skipGeo: "Tuman yetarli",
+  geoOk: "Joylashuv Bekobodda. Telefon raqamini tugma orqali yuboring.",
+  districtOk: "Aniq nuqta kerak — tuman qo‘lda qabul qilinmaydi.",
+  skipGeo: "Geolokatsiya kerak",
   keepGeo: "✅ O‘zgartirmaslik",
   newGeo: "📍 Yangi lokatsiya",
   askKeepGeo: "Oxirgi lokatsiya saqlangan. Yangisini yuborasizmi yoki qoldiramizmi?",
-  pickDistrict: "Tumanni tanlang yoki geolokatsiya yuboring.",
+  pickDistrict: "«Geolokatsiya yuborish» ni bosing.",
+  outsideArea: "📍 Afsuski, ALL SERVIS hozir faqat Bekobod shahrida ishlaydi.\nBu hududda hozir ishlamaymiz.",
   sharePhone: "📱 Raqamni yuborish",
   needPhone: "«Raqamni yuborish» ni bosing yoki +998 90 123 45 67 yozing.",
   commentAsk: "Usta uchun izoh — yoki o‘tkazing.",
@@ -104,7 +107,7 @@ const UZ: Dict = {
   menu: "Menyu",
   masterSpec: "Mutaxassislik?",
   masterPhone: "Raqamingizni yuboring — dispatcher shu orqali bog‘lanadi.",
-  masterGeo: "Geolokatsiya yuboring — xaritada ko‘rinasiz.",
+  masterGeo: "Bekoboddan geolokatsiya yuboring — xaritada ko‘rinasiz.",
   masterDone: "Usta profili saqlandi. Onlayn/oflayn — tugmalar. Admin sizni panelda ko‘radi.",
   goOnline: "Men onlaynman",
   goOffline: "Men oflaynman",
@@ -128,17 +131,7 @@ const SVC_UZ: Record<string, string> = {
 };
 
 const DIST_UZ: Record<string, string> = {
-  chilanzar: "Chilonzor",
-  yunusabad: "Yunusobod",
-  mirzo: "Mirzo Ulug‘bek",
-  yakkasaray: "Yakkasaroy",
-  mirabad: "Mirobod",
-  shayhantahur: "Shayxontohur",
-  almazar: "Olmazor",
-  uchtepa: "Uchtepa",
-  sergeli: "Sergeli",
-  yashnabad: "Yashnobod",
-  bektemir: "Bektemir",
+  bekabad: "Bekobod",
 };
 
 function chunk<T>(arr: T[], size: number): T[][] {
@@ -180,7 +173,7 @@ function districtKeys(lang: Lang | undefined): KeyboardButton[][] {
 }
 
 function geoKeys(lang: Lang | undefined): KeyboardButton[][] {
-  return [[{ id: "geo:share", label: t(lang, "shareGeo"), requestLocation: true }], ...districtKeys(lang)];
+  return [[{ id: "geo:share", label: t(lang, "shareGeo"), requestLocation: true }]];
 }
 
 function keepGeoKeys(lang: Lang | undefined): KeyboardButton[][] {
@@ -357,32 +350,23 @@ export type BotResult = {
   reviewText?: string;
 };
 
-function nearestDistrict(lat: number, lng: number) {
-  let best = DISTRICTS[0]!;
-  let bestD = Infinity;
-  for (const d of DISTRICTS) {
-    const dx = d.lat - lat;
-    const dy = d.lng - lng;
-    const dist = dx * dx + dy * dy;
-    if (dist < bestD) {
-      bestD = dist;
-      best = d;
-    }
-  }
-  return best;
-}
-
 function applyLocation(draft: Draft, lat: number, lng: number): Draft {
-  const distId = draft.districtId ?? nearestDistrict(lat, lng).id;
-  return { ...draft, lat, lng, districtId: distId };
+  const inside = isInsideServiceArea(lat, lng);
+  return {
+    ...draft,
+    lat,
+    lng,
+    districtId: inside ? "bekabad" : undefined,
+    city: inside ? SERVICE_CITY : draft.city,
+  };
 }
 
 function summary(d: Draft): string {
   const lang = d.lang;
   const svc = d.serviceId ? serviceById(d.serviceId) : undefined;
-  const dist = d.districtId ? DISTRICT_COORDS[d.districtId] : undefined;
   const svcTitle = svc ? (lang === "uz" ? SVC_UZ[svc.id] : svc.title) : "—";
-  const distTitle = dist ? (lang === "uz" ? DIST_UZ[d.districtId!] ?? dist.title : dist.title) : "—";
+  const city = d.city || SERVICE_CITY;
+  const area = d.neighborhood || d.fullAddress || (lang === "uz" ? "Bekobod" : SERVICE_CITY);
   const lines =
     lang === "uz"
       ? [
@@ -390,7 +374,8 @@ function summary(d: Draft): string {
           "",
           `Xizmat — ${svcTitle}`,
           `Muammo — ${d.problem ?? "—"}`,
-          `Tuman — ${distTitle}`,
+          `Shahar — ${city}`,
+          `Mahalla — ${area}`,
           `Geo — ${d.lat?.toFixed(5)}, ${d.lng?.toFixed(5)}`,
           `Tel — ${d.phone ?? "—"}`,
           `Foto — ${d.photos.length ? d.photos.length + " ta" : "yo‘q"}`,
@@ -401,7 +386,8 @@ function summary(d: Draft): string {
           "",
           `Услуга — ${svcTitle}`,
           `Задача — ${d.problem ?? "—"}`,
-          `Район — ${distTitle}`,
+          `Город — ${city}`,
+          `Район/махалля — ${area}`,
           `Геолокация — ${d.lat?.toFixed(5)}, ${d.lng?.toFixed(5)}`,
           `Телефон — ${d.phone ?? "—"}`,
           `Фото — ${d.photos.length ? d.photos.length + " шт." : "нет"}`,
@@ -531,6 +517,28 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
 
   if (event.type === "location") {
     const next = applyLocation(draft, event.lat, event.lng);
+    const inside = isInsideServiceArea(event.lat, event.lng);
+    if (!inside) {
+      if (step === "master_geo" || (draft.role === "master" && (step === "master_phone" || step === "master_geo"))) {
+        return {
+          userMessage: user("📍"),
+          replies: [
+            bot(t(lang, "outsideArea"), { buttons: geoKeys(lang) }),
+            bot(t(lang, "masterGeo"), { buttons: geoKeys(lang) }),
+          ],
+          step: "master_geo",
+          draft: { ...next, districtId: undefined },
+        };
+      }
+      return {
+        userMessage: user("📍"),
+        replies: [
+          bot(t(lang, "outsideArea"), { buttons: [...geoKeys(lang), [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Menyuga" : "◀️ В меню" }]] }),
+        ],
+        step: step === "category" || step === "idle" ? "category" : "district",
+        draft: { ...next, districtId: undefined, neighborhood: undefined, fullAddress: undefined },
+      };
+    }
     if (step === "master_geo" || (draft.role === "master" && (step === "master_phone" || step === "master_geo"))) {
       return {
         userMessage: user("📍"),
@@ -837,7 +845,19 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "geo_choice") {
-    if (tapId === "geo:keep") return afterKeepGeo(draft, lang, user(t(lang, "keepGeo")));
+    if (tapId === "geo:keep") {
+      const lat = Number(draft.lat);
+      const lng = Number(draft.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isInsideServiceArea(lat, lng)) {
+        return {
+          userMessage: user(t(lang, "keepGeo")),
+          replies: [bot(`${t(lang, "outsideArea")}\n\n${t(lang, "askGeo")}`, { buttons: geoKeys(lang) })],
+          step: "district",
+          draft: { ...draft, districtId: undefined },
+        };
+      }
+      return afterKeepGeo({ ...draft, districtId: "bekabad", city: SERVICE_CITY }, lang, user(t(lang, "keepGeo")));
+    }
     if (tapId === "geo:new") {
       return {
         userMessage: user(t(lang, "newGeo")),
@@ -855,39 +875,19 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "district" || step === "geo") {
-    if (tapId === "geo:skip") {
+    if (tapId === "geo:skip" || tapId.startsWith("dist:")) {
       return {
-        userMessage: user(t(lang, "skipGeo")),
-        replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
-        step: "phone",
-        draft,
-      };
-    }
-    const dist = tapId.startsWith("dist:")
-      ? DISTRICTS.find((d) => d.id === tapId.slice(5))
-      : DISTRICTS.find((d) => d.title.toLowerCase() === lower || (DIST_UZ[d.id] ?? "").toLowerCase() === lower);
-    if (!dist) {
-      return {
-        userMessage: user(raw),
-        replies: [bot(t(lang, "pickDistrict"), { buttons: geoKeys(lang) })],
+        userMessage: user(raw || t(lang, "skipGeo")),
+        replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
         step: "district",
         draft,
       };
     }
-    const title = lang === "uz" ? DIST_UZ[dist.id] ?? dist.title : dist.title;
     return {
-      userMessage: user(title),
-      replies: [
-        bot(`${title}. ${t(lang, "districtOk")}`, {
-          buttons: [
-            [{ id: "geo:share", label: t(lang, "shareGeo"), requestLocation: true }],
-            [{ id: "geo:skip", label: t(lang, "skipGeo") }],
-            [{ id: "phone:share", label: t(lang, "sharePhone"), requestContact: true }],
-          ],
-        }),
-      ],
-      step: "geo",
-      draft: { ...draft, districtId: dist.id, lat: draft.lat ?? dist.lat, lng: draft.lng ?? dist.lng },
+      userMessage: user(raw),
+      replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
+      step: "district",
+      draft,
     };
   }
 
@@ -939,12 +939,12 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
       };
     }
     if (tapId === "confirm:yes" || lower.includes("подтвер") || lower.includes("tasdiq")) {
-      if (!draft.serviceId || !draft.problem || !draft.phone || !draft.districtId) {
+      if (!draft.serviceId || !draft.problem || !draft.phone || draft.lat == null || draft.lng == null || !isInsideServiceArea(Number(draft.lat), Number(draft.lng))) {
         return {
           userMessage: user(raw),
-          replies: [bot(t(lang, "missing"))],
-          step: "category",
-          draft: { ...emptyDraft(), lang, name: draft.name },
+          replies: [bot(`${t(lang, "missing")}\n${t(lang, "askGeo")}`, { buttons: geoKeys(lang) })],
+          step: "district",
+          draft,
         };
       }
       return { userMessage: user(t(lang, "confirm")), replies: [], step: "live", draft, submit: draft };
