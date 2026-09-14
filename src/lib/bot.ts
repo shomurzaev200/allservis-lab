@@ -4,6 +4,7 @@ import { formatPhone, formatSum, isValidUzPhone, nowTime, uid } from "./utils";
 import { clientLabel } from "./domain";
 import type { OrderStatus } from "./domain";
 import { isInsideServiceArea, SERVICE_CITY } from "./geo";
+import { formatBecomeMaster, formatHowTo, formatOpError, formatPrices, svcTitle } from "./tg-ui";
 
 export const BOT_NAME = "All Servis";
 export const BOT_HANDLE = "@AllServisBot";
@@ -38,7 +39,7 @@ const RU: Dict = {
   pickDistrict: "Нажмите «Отправить геолокацию».",
   outsideArea: "📍 К сожалению, ALL SERVIS сейчас работает только в городе Бекабад.\nМы пока не работаем в этой территории.",
   sharePhone: "📱 Отправить номер",
-  needPhone: "Нажмите «Отправить номер» или введите +998 90 123 45 67.",
+  needPhone: "❌ НЕВЕРНЫЙ НОМЕР\n\nНужен ваш телефон.\nНажмите «📱 Отправить номер»\nили введите +998 XX XXX XX XX.\n\nМинус, плюс без цифр и чужой текст — отказ.",
   commentAsk: "Комментарий для мастера — или пропустите.",
   skipComment: "Без комментария",
   confirm: "Подтвердить",
@@ -90,7 +91,7 @@ const UZ: Dict = {
   pickDistrict: "«Geolokatsiya yuborish» ni bosing.",
   outsideArea: "📍 Afsuski, ALL SERVIS hozir faqat Bekobod shahrida ishlaydi.\nBu hududda hozir ishlamaymiz.",
   sharePhone: "📱 Raqamni yuborish",
-  needPhone: "«Raqamni yuborish» ni bosing yoki +998 90 123 45 67 yozing.",
+  needPhone: "❌ NOTO‘G‘RI RAQAM\n\nO‘z telefoningiz kerak.\n«📱 Raqamni yuborish» ni bosing\nyoki +998 XX XXX XX XX yozing.\n\nMinus, plus yoki boshqa matn — rad.",
   commentAsk: "Usta uchun izoh — yoki o‘tkazing.",
   skipComment: "Izohsiz",
   confirm: "Tasdiqlash",
@@ -141,23 +142,23 @@ function chunk<T>(arr: T[], size: number): T[][] {
 }
 
 function categoryKeys(lang: Lang | undefined): KeyboardButton[][] {
-  const label = (id: ServiceId) => (lang === "uz" ? SVC_UZ[id] : serviceById(id)!.title);
+  const L = lang === "uz" ? "uz" : "ru";
   return [
     [
-      { id: "svc:plumb", label: label("plumb") },
-      { id: "svc:elec", label: label("elec") },
+      { id: "svc:plumb", label: svcTitle("plumb", L) },
+      { id: "svc:elec", label: svcTitle("elec", L) },
     ],
     [
-      { id: "svc:ac", label: label("ac") },
-      { id: "svc:appliance", label: label("appliance") },
+      { id: "svc:ac", label: svcTitle("ac", L) },
+      { id: "svc:appliance", label: svcTitle("appliance", L) },
     ],
     [
-      { id: "svc:furniture", label: label("furniture") },
-      { id: "svc:lock", label: label("lock") },
+      { id: "svc:furniture", label: svcTitle("furniture", L) },
+      { id: "svc:lock", label: svcTitle("lock", L) },
     ],
     [
-      { id: "svc:paint", label: label("paint") },
-      { id: "svc:other", label: label("other") },
+      { id: "svc:paint", label: svcTitle("paint", L) },
+      { id: "svc:other", label: svcTitle("other", L) },
     ],
   ];
 }
@@ -248,19 +249,17 @@ function roleKeys(lang: Lang | undefined): KeyboardButton[][] {
 function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[][] {
   if (lang === "uz") {
     return [
-      [{ id: "cmd:jobs", label: "⚡ Buyurtmalar" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 Onlayn" : "⚪️ Oflayn" }],
-      [{ id: "cmd:loc", label: "📍 Lokatsiya" }, { id: "cmd:active", label: "📦 Faol" }],
-      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:stats", label: "📊 Statistika" }],
-      [{ id: "cmd:ref", label: "👥 Do‘stlar" }, { id: "cmd:help", label: "🆘 Yordam" }],
-      [{ id: "role:client", label: "👤 Mijoz" }, { id: "cmd:cancel", label: "❌ Bekor" }],
+      [{ id: "cmd:jobs", label: "📦 Buyurtmalar" }, { id: "cmd:mbalance", label: "💰 Balans" }],
+      [{ id: "cmd:stats", label: "📊 Statistika" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
+      [{ id: online ? "online:off" : "online:on", label: online ? "🔴 Oflayn" : "🟢 Onlayn" }, { id: "cmd:loc", label: "📍 Lokatsiya" }],
+      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "role:client", label: "👤 Mijoz" }],
     ];
   }
   return [
-    [{ id: "cmd:jobs", label: "⚡ Заказы" }, { id: online ? "online:off" : "online:on", label: online ? "🟢 На линии" : "⚪️ Офлайн" }],
-    [{ id: "cmd:loc", label: "📍 Локация" }, { id: "cmd:active", label: "📦 Активные" }],
-    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:stats", label: "📊 Статистика" }],
-    [{ id: "cmd:ref", label: "👥 Друзья" }, { id: "cmd:help", label: "🆘 Помощь" }],
-    [{ id: "role:client", label: "👤 Клиент" }, { id: "cmd:cancel", label: "❌ Отмена" }],
+    [{ id: "cmd:jobs", label: "📦 Мои заявки" }, { id: "cmd:mbalance", label: "💰 Баланс" }],
+    [{ id: "cmd:stats", label: "📊 Статистика" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
+    [{ id: online ? "online:off" : "online:on", label: online ? "🔴 Офлайн" : "🟢 На линии" }, { id: "cmd:loc", label: "📍 Локация" }],
+    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "role:client", label: "👤 Клиент" }],
   ];
 }
 
@@ -274,14 +273,14 @@ function categoryPickKeys(lang: Lang | undefined): KeyboardButton[][] {
 function liveMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
   if (lang === "uz") {
     return [
-      [{ id: "cmd:myorders", label: "📋 Arizam" }],
-      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:support", label: "💬 Yordam" }],
+      [{ id: "cmd:myorders", label: "📦 Arizam" }],
+      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:support", label: "📞 Operator" }],
       [{ id: "cmd:cancel", label: "❌ Bekor qilish" }],
     ];
   }
   return [
-    [{ id: "cmd:myorders", label: "📋 Моя заявка" }],
-    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:support", label: "💬 Поддержка" }],
+    [{ id: "cmd:myorders", label: "📦 Моя заявка" }],
+    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:support", label: "📞 Оператор" }],
     [{ id: "cmd:cancel", label: "❌ Отменить заявку" }],
   ];
 }
@@ -289,15 +288,19 @@ function liveMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
 function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
   if (lang === "uz") {
     return [
-      [{ id: "cmd:order", label: "🛠 Usta chaqirish" }],
-      [{ id: "cmd:myorders", label: "📋 Arizalarim" }, { id: "cmd:profile", label: "👤 Profil" }],
-      [{ id: "cmd:ref", label: "👥 Do‘stlar" }, { id: "cmd:support", label: "💬 Yordam" }],
+      [{ id: "cmd:order", label: "🔧 Usta chaqirish" }, { id: "cmd:myorders", label: "📦 Arizalarim" }],
+      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:balance", label: "💰 Balans" }],
+      [{ id: "cmd:prices", label: "💵 Narxlar" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
+      [{ id: "cmd:support", label: "📞 Operator" }, { id: "cmd:howto", label: "ℹ️ Qanday ishlaydi" }],
+      [{ id: "cmd:become", label: "👨‍🔧 Usta bo‘lish" }],
     ];
   }
   return [
-    [{ id: "cmd:order", label: "🛠 Вызвать мастера" }],
-    [{ id: "cmd:myorders", label: "📋 Мои заявки" }, { id: "cmd:profile", label: "👤 Профиль" }],
-    [{ id: "cmd:ref", label: "👥 Друзья" }, { id: "cmd:support", label: "💬 Поддержка" }],
+    [{ id: "cmd:order", label: "🔧 Вызвать мастера" }, { id: "cmd:myorders", label: "📦 Мои заявки" }],
+    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:balance", label: "💰 Баланс" }],
+    [{ id: "cmd:prices", label: "💵 Цены и услуги" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
+    [{ id: "cmd:support", label: "📞 Оператор" }, { id: "cmd:howto", label: "ℹ️ Как это работает" }],
+    [{ id: "cmd:become", label: "👨‍🔧 Стать мастером" }],
   ];
 }
 
@@ -445,18 +448,24 @@ export function labelToTapId(raw: string): string | null {
   if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman") || q.includes("на линии")) return "online:on";
   if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn") || q.includes("офлайн")) return "online:off";
   if (q.includes("вызвать") || q.includes("chaqirish") || q === "услуги" || q === "xizmat") return "cmd:order";
-  if (q.includes("доступн") || q.startsWith("⚡") || q.includes("buyurtma")) return "cmd:jobs";
+  if (q.includes("доступн") || q.startsWith("⚡") || q.includes("buyurtma") && !q.includes("usta")) return "cmd:jobs";
   if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
-  if (q.includes("профиль") || q.includes("profil") || q.includes("баланс")) return "cmd:profile";
+  if (q.includes("стать мастером") || q.includes("usta bo") || q === "мастер") return "cmd:become";
+  if (q.includes("профиль") || q.includes("profil")) return "cmd:profile";
+  if (q.includes("баланс") || q.includes("balans")) return "cmd:balance";
+  if (q.includes("цены") || q.includes("narxlar") || q.includes("narx va")) return "cmd:prices";
+  if (q.includes("отзыв") || q.includes("izoh")) return "cmd:reviews";
+  if (q.includes("как это") || q.includes("qanday ishlaydi") || q.includes("как работает")) return "cmd:howto";
   if (q.includes("заявк") || q.includes("ariza")) return "cmd:myorders";
   if (q.includes("активн") || q.includes("faol")) return "cmd:active";
   if (q.includes("статисти") || q.includes("statistika")) return "cmd:stats";
   if (q.includes("помощ") || q.includes("yordam") || q === "/help" || q.includes("поддерж") || q === "оператор" || q === "operator") return "cmd:support";
   if (q.includes("друз") || q.includes("do'st") || q.includes("dostlar") || q.includes("реферал") || q === "/ref") return "cmd:ref";
   if (q.includes("язык") || q === "til" || q === "/lang") return "cmd:lang";
+  if (q.includes("главное меню") || q.includes("bosh menyu") || q === "🏠") return "cmd:menu";
   if (q.includes("меню") || q.includes("menyu") || q.includes("назад")) return "cmd:menu";
-  if (q.includes("режим клиента") || q.includes("mijoz rejim") || q === "клиент") return "role:client";
-  if (q.includes("стать мастером") || q.includes("usta bo") || q === "мастер") return "role:master";
+  if (q === fold("✅ всё верно") || q.includes("всё верно") || q.includes("hammasi to")) return "geo:ok";
+  if (q.includes("другую локац") || q.includes("boshqa lokatsiya")) return "geo:new";
   if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder)) return "cmd:start";
   if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:menu";
   if (q.includes("отмен") || q.includes("bekor") || q === "/cancel") return "cmd:cancel";
@@ -473,7 +482,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
 
   if (event.type === "contact") {
     const phone = formatPhone(event.phone);
-    if (!isValidUzPhone(event.phone) && event.phone.replace(/\D/g, "").length < 8) {
+    if (!isValidUzPhone(event.phone)) {
       return {
         userMessage: user(event.phone),
         replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
@@ -548,7 +557,16 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         registerMaster: true,
       };
     }
-    return afterKeepGeo(next, lang, user("📍"));
+    return {
+      userMessage: user("📍"),
+      replies: [bot(t(lang, "askKeepGeo"), { buttons: [
+        [{ id: "geo:ok", label: lang === "uz" ? "✅ Hammasi to‘g‘ri" : "✅ Всё верно" }],
+        [{ id: "geo:new", label: t(lang, "newGeo"), requestLocation: true }],
+        [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
+      ] })],
+      step: "geo",
+      draft: next,
+    };
   }
 
   const raw = event.type === "text" ? event.text.trim() : event.type === "tap" ? event.label : "";
@@ -659,6 +677,44 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
 
   if (lower === "/help" || tapId === "cmd:help") {
     return { userMessage: user("?"), replies: [bot(t(lang, "help"), { buttons: clientMenuKeys(lang) })], step: step === "live" ? "live" : "category", draft };
+  }
+
+  if (tapId === "cmd:become") {
+    return {
+      userMessage: user(lang === "uz" ? "Usta bo‘lish" : "Стать мастером"),
+      replies: [bot(formatBecomeMaster(lang === "uz" ? "uz" : "ru"), {
+        buttons: [
+          [{ id: "role:master", label: lang === "uz" ? "👨‍🔧 Ro‘yxatdan o‘tish" : "👨‍🔧 Начать регистрацию" }],
+          [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
+        ],
+      })],
+      step: step === "live" ? "live" : "category",
+      draft,
+    };
+  }
+
+  if (tapId === "cmd:prices") {
+    return {
+      userMessage: user(lang === "uz" ? "Narxlar" : "Цены"),
+      replies: [bot(formatPrices(lang === "uz" ? "uz" : "ru"), { buttons: [
+        [{ id: "cmd:order", label: lang === "uz" ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+      ] })],
+      step: step === "live" ? "live" : "category",
+      draft,
+    };
+  }
+
+  if (tapId === "cmd:howto") {
+    return {
+      userMessage: user(lang === "uz" ? "Qanday ishlaydi" : "Как это работает"),
+      replies: [bot(formatHowTo(lang === "uz" ? "uz" : "ru"), { buttons: [
+        [{ id: "cmd:order", label: lang === "uz" ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+      ] })],
+      step: step === "live" ? "live" : "category",
+      draft,
+    };
   }
 
   if (tapId === "cmd:order") {
@@ -875,9 +931,30 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "district" || step === "geo") {
+    if (tapId === "geo:ok") {
+      const lat = Number(draft.lat);
+      const lng = Number(draft.lng);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng) || !isInsideServiceArea(lat, lng)) {
+        return {
+          userMessage: user(raw),
+          replies: [bot(t(lang, "outsideArea"), { buttons: geoKeys(lang) })],
+          step: "district",
+          draft,
+        };
+      }
+      return afterKeepGeo({ ...draft, districtId: "bekabad", city: SERVICE_CITY }, lang, user(lang === "uz" ? "To‘g‘ri" : "Всё верно"));
+    }
     if (tapId === "geo:skip" || tapId.startsWith("dist:")) {
       return {
         userMessage: user(raw || t(lang, "skipGeo")),
+        replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
+        step: "district",
+        draft,
+      };
+    }
+    if (tapId === "geo:new") {
+      return {
+        userMessage: user(t(lang, "newGeo")),
         replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
         step: "district",
         draft,

@@ -245,36 +245,48 @@ export function formatGeoCard(geo: GeoFix, lang: "ru" | "uz" = "ru"): string {
   if (lang === "uz") {
     if (!geo.inside) {
       return [
-        "📍 Afsuski, ALL SERVIS hozir faqat Bekobod shahrida ishlaydi.",
+        "📍 JOYLASHUVNI TEKSHIRISH",
+        "",
+        "Afsuski, ALL SERVIS hozir faqat Bekobod shahrida ishlaydi.",
         "",
         `🏙 Shahar: ${city}`,
-        "Bu hududda hozir ishlamaymiz.",
+        "",
+        "Xizmat shahringizda ochilganda xabar beramiz.",
       ].join("\n");
     }
     return [
-      "✅ Geolokatsiya qabul qilindi",
+      "📍 JOYLASHUV",
+      "",
+      "✅ Lokatsiya qabul qilindi",
       "",
       `🏙 Shahar: ${city}`,
       `📍 Tuman/mahalla: ${area}`,
       `🏠 Manzil: ${addr}`,
-      `Koordinatalar: ${geo.lat.toFixed(5)}, ${geo.lng.toFixed(5)}`,
+      "",
+      "📌 Koordinatalar saqlandi.",
     ].join("\n");
   }
   if (!geo.inside) {
     return [
-      "📍 К сожалению, ALL SERVIS сейчас работает только в городе Бекабад.",
+      "📍 ПРОВЕРКА МЕСТОПОЛОЖЕНИЯ",
+      "",
+      "К сожалению, ALL SERVIS пока работает только в городе Бекабад.",
       "",
       `🏙 Город: ${city || "другой"}`,
-      "Мы пока не работаем в этой территории.",
+      "",
+      "Мы сообщим, когда сервис станет доступен в вашем городе.",
     ].join("\n");
   }
   return [
-    "✅ Геолокация получена",
+    "📍 МЕСТОПОЛОЖЕНИЕ",
+    "",
+    "✅ Локация получена",
     "",
     `🏙 Город: ${city}`,
-    `📍 Район/махалля: ${area}`,
+    `📍 Район / махалля: ${area}`,
     `🏠 Адрес: ${addr}`,
-    `Координаты: ${geo.lat.toFixed(5)}, ${geo.lng.toFixed(5)}`,
+    "",
+    "📌 Координаты сохранены.",
   ].join("\n");
 }
 

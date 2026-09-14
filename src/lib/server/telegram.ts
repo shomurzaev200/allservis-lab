@@ -6,7 +6,9 @@ import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
 import { trackRefEvent } from "./refs";
-import { formatGeoCard, isInsideServiceArea, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
+import { formatGeoCard, isInsideServiceArea, isTashkentDistrictName, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
+import { displayArea, formatClientHome, formatHowTo, formatOpError, HR, statusLine, svcTitle } from "@/lib/tg-ui";
+import { formatSum } from "@/lib/domain";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number };
@@ -230,15 +232,27 @@ async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderI
   if (o.first_name && status !== "cancelled" && status !== "master_rejected" && status !== "waiting_admin") {
     extra = [
       "",
-      `Мастер: ${masterName}`,
-      o.master_phone ? `Телефон: ${o.master_phone}` : "",
-      `Рейтинг: ${stars} ${Number(o.rating ?? 5).toFixed(1)}`,
-      svc ? `Профиль: ${svc.title}` : "",
-      status === "assigned" || status === "master_accepted" || status === "enroute" ? `Ориентир: ~${eta} мин` : "",
+      HR,
+      "",
+      `👨‍🔧 Мастер: ${masterName}`,
+      o.master_phone ? `📞 ${o.master_phone}` : "",
+      `⭐️ ${Number(o.rating ?? 5).toFixed(1)}`,
+      svc ? `🔧 ${svc.title}` : "",
     ]
       .filter(Boolean)
       .join("\n");
   }
+  const titleMap: Partial<Record<OrderStatus, string>> = {
+    assigned: "🔵 МАСТЕР НАЗНАЧЕН",
+    master_accepted: "🟢 МАСТЕР ПРИНЯЛ ЗАЯВКУ",
+    enroute: "🚗 МАСТЕР ЕДЕТ К ВАМ",
+    arrived: "📍 МАСТЕР ПРИБЫЛ",
+    in_progress: "🔧 РАБОТА ВЫПОЛНЯЕТСЯ",
+    completed: "✅ ЗАЯВКА ЗАВЕРШЕНА",
+    cancelled: "❌ ЗАЯВКА ОТМЕНЕНА",
+    master_rejected: "❌ МАСТЕР ОТКАЗАЛСЯ",
+  };
+  const title = titleMap[status] ?? head;
   const rateKb =
     status === "completed"
       ? inline([
@@ -256,7 +270,7 @@ async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderI
   const menu = status === "completed" || status === "cancelled" || status === "master_rejected" ? markup(clientMenu(lang)) : undefined;
   await tg(token, "sendMessage", {
     chat_id: Number(chat),
-    text: `${head}\nЗаявка №${o.public_no}${extra}${status === "completed" ? "\n\nОцените мастера звёздами. Потом можно написать отзыв текстом." : ""}`,
+    text: `${title}\n\n📦 Заявка №${o.public_no}${extra}${status === "completed" ? "\n\nОцените мастера звёздами." : ""}`,
     reply_markup: rateKb ?? menu ?? undefined,
   });
   if (status === "completed" || status === "cancelled" || status === "master_rejected") {
@@ -418,9 +432,9 @@ async function saveReviewComment(sql: Sql, uid: string, chatId: string, text: st
 async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: string, tapId: string, loc?: { lat: number; lng: number }) {
   const m = await sql<{
     id: number; first_name: string; last_name: string; phone: string; rating: number;
-    earnings: number; completed_orders: number; online_status: string; district: string;
+    earnings: number; completed_orders: number; online_status: string; district: string; specialization: string;
   }>`
-    select id, first_name, last_name, phone, rating, earnings, completed_orders, online_status, district
+    select id, first_name, last_name, phone, rating, earnings, completed_orders, online_status, district, specialization
     from as_masters where user_id = ${uid} and telegram_id = ${chatId} limit 1
   `;
   if (!m[0]) return false;
@@ -462,10 +476,71 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
     });
     return true;
   }
-  if (tapId === "cmd:stats" || tapId === "cmd:profile") {
+  if (tapId === "cmd:stats" || tapId === "cmd:profile" || tapId === "cmd:mbalance") {
+    const extra = await sql<{ accepted_orders: number; rejected_orders: number; city: string }>`
+      select accepted_orders, rejected_orders, city from as_masters where id = ${m[0].id}
+    `;
+    const acc = Number(extra[0]?.accepted_orders ?? 0);
+    const rej = Number(extra[0]?.rejected_orders ?? 0);
+    const tot = acc + rej;
+    const pct = tot ? Math.round((acc / tot) * 100) : 0;
+    const area = displayArea(m[0].district, null, null);
+    const st = m[0].online_status === "online" ? "🟢 Онлайн" : m[0].online_status === "busy" ? "🟡 Занят" : "🔴 Офлайн";
+    const today = await sql<{ n: number }>`
+      select coalesce(sum(master_payout),0)::int as n from as_orders
+      where master_id = ${m[0].id} and status = 'completed' and completed_at::date = current_date
+    `.catch(() => [{ n: 0 }]);
+    const week = await sql<{ n: number }>`
+      select coalesce(sum(master_payout),0)::int as n from as_orders
+      where master_id = ${m[0].id} and status = 'completed' and completed_at >= date_trunc('week', now())
+    `.catch(() => [{ n: 0 }]);
+    const month = await sql<{ n: number }>`
+      select coalesce(sum(master_payout),0)::int as n from as_orders
+      where master_id = ${m[0].id} and status = 'completed' and completed_at >= date_trunc('month', now())
+    `.catch(() => [{ n: 0 }]);
+    if (tapId === "cmd:mbalance") {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: [
+          "💰 МОЙ БАЛАНС",
+          "",
+          "Доступно:",
+          "",
+          formatSum(Number(m[0].earnings)),
+          "",
+          HR,
+          "",
+          `📈 Заработано сегодня: ${formatSum(Number(today[0]?.n ?? 0))}`,
+          `📅 За неделю: ${formatSum(Number(week[0]?.n ?? 0))}`,
+          `📆 За месяц: ${formatSum(Number(month[0]?.n ?? 0))}`,
+        ].join("\n"),
+        reply_markup: markup(masterMenu("ru", online)),
+      });
+      return true;
+    }
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
-      text: `${m[0].first_name} ${m[0].last_name}\nТел: ${m[0].phone}\nРайон: ${m[0].district || "—"}\nРейтинг: ${Number(m[0].rating).toFixed(2)}\nЗавершено: ${m[0].completed_orders}\nБаланс: ${Number(m[0].earnings).toLocaleString("ru-RU")} сум\nСтатус: ${m[0].online_status}`,
+      text: [
+        "👨‍🔧 ПРОФИЛЬ МАСТЕРА",
+        "",
+        HR,
+        "",
+        `👤 ${m[0].first_name} ${m[0].last_name}`,
+        "",
+        `🔧 ${svcTitle(m[0].specialization)}`,
+        `⭐️ ${Number(m[0].rating).toFixed(2)}`,
+        "",
+        `📦 Выполнено: ${m[0].completed_orders}`,
+        `✅ Принято: ${pct}%`,
+        `❌ Отказов: ${tot ? 100 - pct : 0}%`,
+        "",
+        HR,
+        "",
+        `💰 Баланс: ${formatSum(Number(m[0].earnings))}`,
+        `📍 ${isTashkentDistrictName(area) ? SERVICE_CITY : area || SERVICE_CITY}`,
+        "",
+        st,
+      ].join("\n"),
       reply_markup: markup(masterMenu("ru", online)),
     });
     return true;
@@ -496,7 +571,12 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
     for (const j of jobs) {
       await tg(token, "sendMessage", {
         chat_id: Number(chatId),
-        text: `№${j.public_no} · ${j.district}\n${j.description}\nСтатус: ${j.status}`,
+        text: [
+          `📦 №${j.public_no}`,
+          statusLine(j.status),
+          `📍 ${displayArea(j.district)}`,
+          j.description,
+        ].filter(Boolean).join("\n"),
         reply_markup: jobButtons(j.id, j.status),
       });
     }
@@ -1700,9 +1780,10 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
   const lng = draft.lng ?? null;
   const inside = lat != null && lng != null && isInsideServiceArea(Number(lat), Number(lng));
   const city = inside ? SERVICE_CITY : "";
-  const district = inside
+  const districtRaw = inside
     ? (draft.neighborhood || draft.fullAddress || districtById(draft.districtId ?? "")?.title || SERVICE_CITY)
     : (draft.neighborhood || "");
+  const district = isTashkentDistrictName(districtRaw) ? (inside ? SERVICE_CITY : "") : districtRaw;
   try {
     const existing = await sql<{ id: number }>`
       select id from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
@@ -1796,25 +1877,321 @@ async function pushSupportAlert(
   }
 }
 
+function navKb(lang: string | undefined, live: boolean) {
+  return kbClient(lang, live);
+}
+
+async function clientPaidSum(sql: Sql, uid: string, chatId: string): Promise<number> {
+  try {
+    const rows = await sql<{ n: number }>`
+      select coalesce(sum(amount), 0)::int as n from as_payments
+      where user_id = ${uid} and telegram_id = ${chatId} and status = 'approved'
+    `;
+    return Number(rows[0]?.n ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+async function sendHome(sql: Sql, uid: string, token: string, chatId: string, name: string, lang: string, live: boolean) {
+  const c = await sql<{ name: string; city: string; district: string; lat: number | null; lng: number | null }>`
+    select name, city, district, lat, lng from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+  `;
+  const row = c[0];
+  const city = displayArea(row?.city || row?.district, row?.lat, row?.lng, lang === "uz" ? "uz" : "ru");
+  const balance = await clientPaidSum(sql, uid, chatId);
+  const text = formatClientHome({
+    name: row?.name || name,
+    city: city === "не определён" || city === "aniqlanmadi" ? SERVICE_CITY : city,
+    balance,
+    lang: lang === "uz" ? "uz" : "ru",
+  });
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(navKb(lang, live)) });
+}
+
+async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
+  const sum = await clientPaidSum(sql, uid, chatId);
+  const hist = await sql<{ amount: number; status: string; created_at: string }>`
+    select amount, status, created_at::text as created_at from as_payments
+    where user_id = ${uid} and telegram_id = ${chatId}
+    order by created_at desc limit 8
+  `.catch(() => [] as { amount: number; status: string; created_at: string }[]);
+  const paid = await sql<{ paid: boolean }>`select coalesce(paid, false) as paid from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1`;
+  const ws = await sql<{ pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number }>`
+    select pay_card, pay_bank, pay_holder, pay_amount from as_workspace where user_id = ${uid}
+  `;
+  const L = lang === "uz";
+  const lines = [
+    L ? "💰 MENING BALANSIM" : "💰 МОЙ БАЛАНС",
+    "",
+    HR,
+    "",
+    L ? "💵 Mavjud:" : "💵 Доступно:",
+    "",
+    formatSum(sum),
+    "",
+    paid[0]?.paid ? (L ? "✅ Kirish ochiq" : "✅ Доступ открыт") : (L ? "⏳ To‘lov kutilmoqda" : "⏳ Ожидает оплату"),
+    "",
+    HR,
+  ];
+  if (hist.length) {
+    lines.push("", L ? "📊 Operatsiyalar:" : "📊 История операций:", "");
+    for (const h of hist) {
+      const sign = h.status === "approved" ? "➕" : h.status === "cancelled" ? "❌" : "⏳";
+      const label = h.status === "approved" ? (L ? "To‘ldirish" : "Пополнение") : h.status === "cancelled" ? (L ? "Bekor" : "Отмена") : (L ? "Kutilmoqda" : "На проверке");
+      lines.push(`${sign} ${label}`, `${h.status === "cancelled" ? "" : "+"}${Number(h.amount).toLocaleString("ru-RU")} сум`, "");
+    }
+  } else {
+    lines.push("", L ? "Hali operatsiya yo‘q." : "Операций пока нет.");
+  }
+  const btns: KeyboardButton[][] = [
+    [{ id: "cmd:pay", label: L ? "➕ To‘ldirish" : "➕ Пополнить баланс" }],
+    [{ id: "cmd:menu", label: L ? "◀️ Orqaga" : "◀️ Назад" }],
+  ];
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text: lines.join("\n"), reply_markup: markup(btns) });
+  void ws;
+}
+
+async function sendOperator(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
+  const ws = await sql<{ pay_holder: string | null; bot_username: string | null }>`
+    select pay_holder, bot_username from as_workspace where user_id = ${uid}
+  `;
+  const L = lang === "uz";
+  const holder = (ws[0]?.pay_holder ?? "").trim();
+  const text = [
+    L ? "📞 OPERATOR BILAN ALOQA" : "📞 СВЯЗЬ С ОПЕРАТОРОМ",
+    "",
+    L ? "Savol yoki muammo bo‘lsa — dispatcher yordam beradi." : "Если у вас вопрос или проблема,\nнаш оператор поможет вам.",
+    "",
+    L ? "🕐 Ish vaqti:\n09:00 — 21:00" : "🕐 Время работы:\n09:00 — 21:00",
+    holder ? `\n👤 ${holder}` : "",
+  ].filter(Boolean).join("\n");
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text,
+    reply_markup: markup([
+      [{ id: "cmd:writeop", label: L ? "💬 Yozish" : "💬 Написать оператору" }],
+      [{ id: "cmd:menu", label: L ? "◀️ Orqaga" : "◀️ Назад" }],
+    ]),
+  });
+}
+
+async function sendReviews(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean, masterId?: number) {
+  const rows = masterId
+    ? await sql<{ rating: number; comment: string; first_name: string }>`
+        select r.rating, r.comment, coalesce(m.first_name, '') as first_name
+        from as_reviews r left join as_masters m on m.id = r.master_id
+        where r.user_id = ${uid} and r.master_id = ${masterId}
+        order by r.created_at desc limit 6
+      `
+    : await sql<{ rating: number; comment: string; first_name: string }>`
+        select r.rating, r.comment, coalesce(m.first_name, 'Usta') as first_name
+        from as_reviews r left join as_masters m on m.id = r.master_id
+        where r.user_id = ${uid} and coalesce(r.comment, '') <> ''
+        order by r.created_at desc limit 6
+      `;
+  const L = lang === "uz";
+  const lines = [L ? "⭐️ IZOHLAR" : "⭐️ ОТЗЫВЫ", "", HR, ""];
+  if (!rows.length) lines.push(L ? "Hali izoh yo‘q." : "Пока нет отзывов.");
+  for (const r of rows) {
+    const stars = "⭐️".repeat(Math.max(1, Math.min(5, Math.round(Number(r.rating) || 5))));
+    lines.push(`${stars}  ${r.first_name || "Мастер"}`);
+    if (r.comment) lines.push(r.comment);
+    lines.push("");
+  }
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text: lines.join("\n"),
+    reply_markup: markup([[{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }]]),
+  });
+}
+
 async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
-  const mine = await sql<{ public_no: number; status: string; district: string; master_name: string | null }>`
-    select o.public_no, o.status, o.district,
+  const mine = await sql<{
+    id: number; public_no: number; status: string; district: string; city: string; address: string;
+    category_slug: string; master_name: string | null; lat: number | null; lng: number | null; created_at: string;
+  }>`
+    select o.id, o.public_no, o.status, o.district, o.city, o.address, o.category_slug, o.lat, o.lng,
+      o.created_at::text as created_at,
       nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') as master_name
     from as_orders o
     join as_clients c on c.id = o.client_id
     left join as_masters m on m.id = o.master_id
     where o.user_id = ${uid} and c.telegram_id = ${chatId}
-    order by o.created_at desc limit 8
+    order by o.created_at desc limit 6
   `;
-  const lines = mine.length
-    ? mine.map((x) => {
-        const st = STATUS_LABEL[x.status as OrderStatus] ?? x.status;
-        const who = x.master_name ? ` · ${x.master_name}` : "";
-        return `№${x.public_no} · ${st}\n${x.district || "—"}${who}`;
-      }).join("\n\n")
-    : (lang === "uz" ? "Ariza yo‘q." : "Заявок пока нет.");
-  const head = lang === "uz" ? "📋 Arizalarim" : "📋 Мои заявки";
-  await tg(token, "sendMessage", { chat_id: Number(chatId), text: `${head}\n\n${lines}`, reply_markup: markup(kbClient(lang, live)) });
+  const L = lang === "uz";
+  if (!mine.length) {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: L ? "📦 ARIZALARIM\n\nHali ariza yo‘q." : "📦 МОИ ЗАЯВКИ\n\nЗаявок пока нет.",
+      reply_markup: markup([
+        [{ id: "cmd:order", label: L ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+      ]),
+    });
+    return;
+  }
+  const blocks = mine.map((x) => {
+    const area = displayArea(x.district || x.city, x.lat, x.lng, L ? "uz" : "ru");
+    const when = x.created_at ? new Date(x.created_at).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+    return [
+      `${statusLine(x.status, L ? "uz" : "ru").slice(0, 2)} Заявка №${x.public_no}`.replace("Заявка", L ? "Ariza" : "Заявка"),
+      "",
+      svcTitle(x.category_slug, L ? "uz" : "ru"),
+      `📍 ${area}`,
+      when ? `📅 ${when}` : "",
+      "",
+      L ? "Status:" : "Статус:",
+      statusLine(x.status, L ? "uz" : "ru"),
+      x.master_name ? `👨‍🔧 ${x.master_name}` : "",
+    ].filter((l, i, a) => l !== "" || a[i - 1] !== "").join("\n");
+  });
+  const text = [L ? "📦 ARIZALARIM" : "📦 МОИ ЗАЯВКИ", "", HR, "", blocks.join(`\n${HR}\n\n`)].join("\n");
+  const btns: KeyboardButton[][] = mine.map((x) => [{ id: `ord:${x.id}`, label: `📦 №${x.public_no}` }]);
+  btns.push([{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }]);
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(btns) });
+}
+
+async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId: string, orderId: number, lang: string, live: boolean) {
+  const rows = await sql<{
+    id: number; public_no: number; status: string; district: string; city: string; address: string;
+    category_slug: string; description: string; lat: number | null; lng: number | null; created_at: string;
+    master_name: string | null; master_phone: string | null; rating: number | null;
+  }>`
+    select o.id, o.public_no, o.status, o.district, o.city, o.address, o.category_slug, o.description,
+      o.lat, o.lng, o.created_at::text as created_at,
+      nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') as master_name,
+      m.phone as master_phone, m.rating
+    from as_orders o
+    left join as_masters m on m.id = o.master_id
+    where o.user_id = ${uid} and o.id = ${orderId}
+    limit 1
+  `;
+  const o = rows[0];
+  const L = lang === "uz";
+  if (!o) {
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: formatOpError(L ? "uz" : "ru"), reply_markup: markup(navKb(lang, live)) });
+    return;
+  }
+  const area = displayArea(o.district || o.city, o.lat, o.lng, L ? "uz" : "ru");
+  const when = o.created_at ? new Date(o.created_at).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
+  const text = [
+    L ? `📦 ARIZA №${o.public_no}` : `📦 ЗАЯВКА №${o.public_no}`,
+    "",
+    HR,
+    "",
+    L ? "🔧 Xizmat:" : "🔧 Услуга:",
+    svcTitle(o.category_slug, L ? "uz" : "ru"),
+    "",
+    L ? "📝 Muammo:" : "📝 Проблема:",
+    o.description || "—",
+    "",
+    L ? "📍 Joy:" : "📍 Местоположение:",
+    SERVICE_CITY,
+    "",
+    L ? "📍 Tuman/mahalla:" : "📍 Район/махалля:",
+    area,
+    "",
+    L ? "🏠 Manzil:" : "🏠 Адрес:",
+    o.address && !isTashkentDistrictName(o.address) ? o.address : (L ? "aniqlanmadi" : "не определён"),
+    "",
+    HR,
+    "",
+    L ? "👨‍🔧 Usta:" : "👨‍🔧 Мастер:",
+    o.master_name || (L ? "Tayinlash kutilmoqda" : "Ожидает назначения"),
+    o.rating != null && o.master_name ? `⭐️ ${Number(o.rating).toFixed(1)}` : "",
+    "",
+    statusLine(o.status, L ? "uz" : "ru"),
+    "",
+    HR,
+    "",
+    L ? "🕐 Yaratildi:" : "🕐 Создана:",
+    when,
+  ].filter((l, i, a) => l !== "" || a[i - 1] !== "").join("\n");
+  const btns: KeyboardButton[][] = [];
+  if (o.status === "waiting_admin" || o.status === "assigned" || o.status === "master_rejected") {
+    btns.push([{ id: "cmd:myorders", label: L ? "🔄 Yangilash" : "🔄 Обновить статус" }]);
+    btns.push([{ id: "cmd:cancel", label: L ? "❌ Bekor qilish" : "❌ Отменить заявку" }]);
+  } else if (o.master_name && o.status !== "completed" && o.status !== "cancelled") {
+    if (o.master_phone) btns.push([{ id: `callm:${o.id}`, label: L ? "📞 Bog‘lanish" : "📞 Связаться" }]);
+    btns.push([{ id: "cmd:myorders", label: L ? "📦 Arizalar" : "📦 Мои заявки" }]);
+  } else if (o.status === "completed") {
+    btns.push([{ id: "cmd:order", label: L ? "🔄 Qayta chaqirish" : "🔄 Заказать снова" }]);
+  }
+  btns.push([{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }]);
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(btns) });
+}
+
+async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
+  const c = await sql<{
+    name: string; phone: string; district: string; city: string; lat: number | null; lng: number | null;
+    orders_count: number; completed_count: number; last_master: string | null; last_no: number | null; last_status: string | null;
+  }>`
+    select cl.name, cl.phone, cl.district, cl.city, cl.lat, cl.lng,
+      (select count(*)::int from as_orders o where o.client_id = cl.id) as orders_count,
+      (select count(*)::int from as_orders o where o.client_id = cl.id and o.status = 'completed') as completed_count,
+      (select nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') from as_orders o
+        left join as_masters m on m.id = o.master_id
+        where o.client_id = cl.id and o.master_id is not null
+        order by coalesce(o.completed_at, o.updated_at) desc limit 1) as last_master,
+      (select o.public_no from as_orders o where o.client_id = cl.id order by o.created_at desc limit 1) as last_no,
+      (select o.status from as_orders o where o.client_id = cl.id order by o.created_at desc limit 1) as last_status
+    from as_clients cl
+    where cl.user_id = ${uid} and cl.telegram_id = ${chatId}
+    limit 1
+  `;
+  const row = c[0];
+  const L = lang === "uz";
+  const area = displayArea(row?.district || row?.city, row?.lat, row?.lng, L ? "uz" : "ru");
+  const cityShow = (row?.lat != null && row?.lng != null && isInsideServiceArea(Number(row.lat), Number(row.lng)))
+    ? SERVICE_CITY
+    : (isTashkentDistrictName(row?.district) || isTashkentDistrictName(row?.city) ? (L ? "aniqlanmadi" : "не определён") : (row?.city && !isTashkentDistrictName(row.city) ? row.city : SERVICE_CITY));
+  const active = (row?.orders_count ?? 0) - (row?.completed_count ?? 0);
+  const balance = await clientPaidSum(sql, uid, chatId);
+  const geoLine = (row?.lat != null && row?.lng != null && isInsideServiceArea(Number(row.lat), Number(row.lng)))
+    ? `${SERVICE_CITY}${area && area !== SERVICE_CITY ? ", " + area : ""}`
+    : (L ? "lokatsiya yo‘q" : "локация не указана");
+  const text = [
+    L ? "👤 MENING PROFILIM" : "👤 МОЙ ПРОФИЛЬ",
+    "",
+    HR,
+    "",
+    `👤 ${row?.name || "—"}`,
+    "",
+    `📱 ${row?.phone || "—"}`,
+    "",
+    `📍 ${cityShow}`,
+    `📍 ${L ? "Tuman" : "Район"}: ${area}`,
+    "",
+    HR,
+    "",
+    L ? "💰 Balans" : "💰 Баланс",
+    formatSum(balance),
+    "",
+    L ? "📦 Jami arizalar" : "📦 Всего заявок",
+    String(row?.orders_count ?? 0),
+    "",
+    L ? "✅ Yakunlangan" : "✅ Завершено",
+    String(row?.completed_count ?? 0),
+    "",
+    L ? "⏳ Faol" : "⏳ Активных",
+    String(Math.max(0, active)),
+    "",
+    HR,
+    "",
+    L ? "📍 Oxirgi joylashuv" : "📍 Последняя геолокация",
+    geoLine,
+  ].join("\n");
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text,
+    reply_markup: markup([
+      [{ id: "cmd:balance", label: L ? "💰 Balans" : "💰 Баланс" }, { id: "cmd:myorders", label: L ? "📦 Arizalar" : "📦 Мои заявки" }],
+      [{ id: "cmd:loc", label: L ? "📍 Lokatsiya" : "📍 Изменить локацию" }, { id: "cmd:become", label: L ? "👨‍🔧 Usta" : "👨‍🔧 Стать мастером" }],
+      [{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+    ]),
+  });
 }
 
 async function sendClientRef(sql: Sql, uid: string, token: string, chatId: string, name: string, lang: string, live: boolean) {
@@ -1830,47 +2207,6 @@ async function sendClientRef(sql: Sql, uid: string, token: string, chatId: strin
     ? `Sizning shaxsiy havolangiz (faqat sizniki):\n${link || "Avval /start"}\n\nTaklif qilingan: ${invited[0]?.n ?? 0}`
     : `Ваша уникальная ссылка (только для этого аккаунта):\n${link || "Напишите /start ещё раз"}\n\nПриглашено друзей: ${invited[0]?.n ?? 0}\nДруг открывает ссылку — вы в статистике «Рефералы».`;
   await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(kbClient(lang, live)) });
-}
-
-async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
-  const c = await sql<{
-    name: string; phone: string; district: string; lat: number | null; lng: number | null;
-    orders_count: number; completed_count: number; last_master: string | null; last_no: number | null; last_status: string | null;
-  }>`
-    select cl.name, cl.phone, cl.district, cl.lat, cl.lng,
-      (select count(*)::int from as_orders o where o.client_id = cl.id) as orders_count,
-      (select count(*)::int from as_orders o where o.client_id = cl.id and o.status = 'completed') as completed_count,
-      (select nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') from as_orders o
-        left join as_masters m on m.id = o.master_id
-        where o.client_id = cl.id and o.master_id is not null
-        order by coalesce(o.completed_at, o.updated_at) desc limit 1) as last_master,
-      (select o.public_no from as_orders o where o.client_id = cl.id order by o.created_at desc limit 1) as last_no,
-      (select o.status from as_orders o where o.client_id = cl.id order by o.created_at desc limit 1) as last_status
-    from as_clients cl
-    where cl.user_id = ${uid} and cl.telegram_id = ${chatId}
-    limit 1
-  `;
-  const row = c[0];
-  const geo = row?.lat != null && row?.lng != null ? `${Number(row.lat).toFixed(5)}, ${Number(row.lng).toFixed(5)}` : "—";
-  const lastSt = row?.last_status ? (STATUS_LABEL[row.last_status as OrderStatus] ?? row.last_status) : "—";
-  const text = [
-    lang === "uz" ? "👤 Profil" : "👤 Профиль",
-    "",
-    `${lang === "uz" ? "Ism" : "Имя"}: ${row?.name || "—"}`,
-    `${lang === "uz" ? "Tel" : "Телефон"}: ${row?.phone || "—"}`,
-    `${lang === "uz" ? "Tuman" : "Район"}: ${row?.district || "—"}`,
-    `${lang === "uz" ? "Oxirgi geo" : "Последняя геолокация"}: ${geo}`,
-    `${lang === "uz" ? "Arizalar" : "Заявок"}: ${row?.orders_count ?? 0} (${lang === "uz" ? "tugagan" : "завершено"} ${row?.completed_count ?? 0})`,
-    row?.last_no ? `${lang === "uz" ? "Oxirgi ariza" : "Последняя заявка"}: №${row.last_no} · ${lastSt}` : "",
-    `${lang === "uz" ? "Oxirgi usta" : "Последний мастер"}: ${row?.last_master || "—"}`,
-    "",
-    lang === "uz" ? "Til: tugma Русский / O‘zbekcha. Usta: «Мастер»." : "Язык — кнопки ниже. Стать мастером: напишите «Мастер».",
-  ].filter(Boolean).join("\n");
-  await tg(token, "sendMessage", {
-    chat_id: Number(chatId),
-    text,
-    reply_markup: markup(kbClient(lang, live)),
-  });
 }
 
 async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: string, draft: Draft) {
@@ -2066,6 +2402,76 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     await sendClientOrders(sql, uid, token, chatId, lang, live);
     return { ok: true };
   }
+  if (tapGuess?.startsWith("ord:")) {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const oid = Number(tapGuess.slice(4));
+    if (oid) await sendClientOrderCard(sql, uid, token, chatId, oid, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:balance" || tapGuess === "cmd:mbalance") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    if (masterExists[0] && (draft.role === "master" || tapGuess === "cmd:mbalance")) {
+      await handleMasterMenu(sql, uid, token, chatId, "cmd:mbalance");
+      return { ok: true };
+    }
+    await sendClientBalance(sql, uid, token, chatId, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:reviews") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    if (masterExists[0] && draft.role === "master") {
+      await sendReviews(sql, uid, token, chatId, lang, live, masterExists[0].id);
+      return { ok: true };
+    }
+    await sendReviews(sql, uid, token, chatId, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:support" || tapGuess === "cmd:writeop") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    if (tapGuess === "cmd:support") {
+      await sendOperator(sql, uid, token, chatId, lang, live);
+      return { ok: true };
+    }
+    await sql`
+      insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+      values (${uid}, ${chatId}, ${"support"}, ${JSON.stringify(draft)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"support"}, draft = ${JSON.stringify(draft)}, tg_name = ${name}, updated_at = now()
+    `;
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: lang === "uz"
+        ? "Savolingizni yozing — dispatcher siz bilan bog‘lanadi."
+        : "Напишите вопрос — диспетчер свяжется с вами.",
+      reply_markup: markup(kbClient(lang, live)),
+    });
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:pay") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const wsPay = await sql<{ pay_card: string | null; pay_bank: string | null; pay_holder: string | null; pay_amount: number }>`
+      select pay_card, pay_bank, pay_holder, pay_amount from as_workspace where user_id = ${uid}
+    `;
+    const p = wsPay[0];
+    const amt = Number(p?.pay_amount ?? 0);
+    const text = [
+      lang === "uz" ? "➕ BALANSNI TO‘LDIRISH" : "➕ ПОПОЛНИТЬ БАЛАНС",
+      "",
+      amt ? `💵 ${formatSum(amt)}` : "",
+      p?.pay_bank ? `🏦 ${p.pay_bank}` : "",
+      p?.pay_card ? `💳 ${p.pay_card}` : "",
+      p?.pay_holder ? `👤 ${p.pay_holder}` : "",
+      "",
+      lang === "uz"
+        ? "To‘lov chekini rasm qilib yuboring — admin tekshiradi."
+        : "Пришлите скрин оплаты фотографией — администратор проверит.",
+    ].filter(Boolean).join("\n");
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: text.trim() || (lang === "uz" ? "To‘lov hozir sozlanmagan." : "Реквизиты пока не настроены в админке."),
+      reply_markup: markup([[{ id: "cmd:balance", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }]]),
+    });
+    return { ok: true };
+  }
   if (tapGuess === "cmd:ref") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     await sendClientRef(sql, uid, token, chatId, name, lang, live);
@@ -2085,27 +2491,23 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
-      text: lang === "uz"
-        ? "🛠 Usta chaqirish — ariza\n📋 Arizalarim — status\n👤 Profil — ma’lumot\n👥 Do‘stlar — havola\n💬 Yordam — dispatcher"
-        : "🛠 Вызвать мастера — заявка\n📋 Мои заявки — статус\n👤 Профиль — данные\n👥 Друзья — ваша ссылка\n💬 Поддержка — диспетчер увидит алерт",
-      reply_markup: markup(kbClient(lang, live)),
+      text: lang === "uz" ? formatHowTo("uz") : formatHowTo("ru"),
+      reply_markup: markup([
+        [{ id: "cmd:order", label: lang === "uz" ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+      ]),
     });
     return { ok: true };
   }
-  if (tapGuess === "cmd:support") {
+  if ((tapGuess === "cmd:menu" || msg?.text === "/start") && !live && draft.role !== "master" && (draft.phone || step === "category" || step === "idle")) {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    await persistProfile(sql, uid, chatId, name, draft);
+    await sendHome(sql, uid, token, chatId, name, lang, false);
     await sql`
       insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
-      values (${uid}, ${chatId}, ${"support"}, ${JSON.stringify(draft)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
-      on conflict (user_id, chat_id) do update set step = ${"support"}, draft = ${JSON.stringify(draft)}, tg_name = ${name}, updated_at = now()
+      values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, tg_name = ${name}, updated_at = now()
     `;
-    await tg(token, "sendMessage", {
-      chat_id: Number(chatId),
-      text: lang === "uz"
-        ? "Savolingizni yozing — dispatcher siz bilan bog‘lanadi."
-        : "Напишите вопрос — диспетчер свяжется с вами.",
-      reply_markup: markup(kbClient(lang, live)),
-    });
     return { ok: true };
   }
   try {
@@ -2178,9 +2580,19 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       districtId: geo.inside ? "bekabad" : undefined,
     };
     const card = formatGeoCard(geo, lang);
-    if (result.replies[0]) result.replies[0] = { ...result.replies[0], text: card };
-    else result.replies.push({ id: "geo-card", from: "bot", text: card, time: "" });
+    const geoBtns = geo.inside
+      ? [
+          [{ id: "geo:ok", label: lang === "uz" ? "✅ Hammasi to‘g‘ri" : "✅ Всё верно" }],
+          [{ id: "geo:new", label: lang === "uz" ? "📍 Boshqa lokatsiya" : "📍 Другая локация", requestLocation: true }],
+          [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
+        ]
+      : [
+          [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+        ];
+    if (result.replies[0]) result.replies[0] = { ...result.replies[0], text: card, buttons: geoBtns };
+    else result.replies.push({ id: "geo-card", from: "bot", text: card, time: "", buttons: geoBtns });
     if (!geo.inside) step = draft.role === "master" ? "master_geo" : "district";
+    else if (draft.role !== "master") step = "geo";
   }
 
   await persistProfile(sql, uid, chatId, name, draft);
@@ -2268,11 +2680,35 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
           values (${uid}, ${chatId}, ${"live"}, ${JSON.stringify(draft)}, ${created.id}, ${"waiting_admin"}, ${name}, now())
           on conflict (user_id, chat_id) do update set step = ${"live"}, draft = ${JSON.stringify(draft)}, live_order_id = ${created.id}, last_status = ${"waiting_admin"}, tg_name = ${name}, updated_at = now()
         `;
-        const reply = statusReply("waiting_admin");
+        const replyText = [
+          lang === "uz" ? "✅ ARIZA YARATILDI" : "✅ ЗАЯВКА СОЗДАНА",
+          "",
+          `📦 №${created.publicNo}`,
+          "",
+          lang === "uz" ? "🔧 Xizmat:" : "🔧 Услуга:",
+          svcTitle(svc.id, lang === "uz" ? "uz" : "ru"),
+          "",
+          `📍 ${SERVICE_CITY}`,
+          geo.neighborhood ? `📍 ${geo.neighborhood}` : "",
+          geo.fullAddress ? `🏠 ${geo.fullAddress}` : "",
+          "",
+          HR,
+          "",
+          lang === "uz" ? "🟡 Status:" : "🟡 Статус:",
+          "",
+          lang === "uz" ? "Usta tayinlanishi kutilmoqda." : "Ожидает назначения мастера.",
+          "",
+          lang === "uz"
+            ? "Dispatcher mos ustani tanlaydi va xabar beradi."
+            : "Диспетчер подберёт подходящего мастера\nи сообщит вам после назначения.",
+        ].filter((l, i, a) => l !== "" || a[i - 1] !== "").join("\n");
         await tg(token, "sendMessage", {
           chat_id: Number(chatId),
-          text: `${reply.text}\n\nЗаявка №${created.publicNo}\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум\nОтмена: /cancel`,
-          reply_markup: markup(liveMenu(draft.lang)),
+          text: replyText,
+          reply_markup: markup([
+            [{ id: `ord:${created.id}`, label: lang === "uz" ? "📦 Arizani ochish" : "📦 Открыть заявку" }],
+            [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+          ]),
         });
       } catch (err) {
         const msgText = err instanceof Error && err.message === "CLIENT_BLOCKED"
@@ -2281,8 +2717,16 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
             ? (lang === "uz"
               ? "📍 ALL SERVIS hozir faqat Bekobodda ishlaydi."
               : "📍 ALL SERVIS сейчас работает только в городе Бекабад.")
-          : "Не удалось создать заявку. Попробуйте ещё раз.";
-        await tg(token, "sendMessage", { chat_id: Number(chatId), text: msgText });
+          : formatOpError(lang === "uz" ? "uz" : "ru");
+        await tg(token, "sendMessage", {
+          chat_id: Number(chatId),
+          text: msgText,
+          reply_markup: markup([
+            [{ id: "cmd:order", label: lang === "uz" ? "🔄 Qayta" : "🔄 Повторить" }],
+            [{ id: "cmd:support", label: lang === "uz" ? "📞 Operator" : "📞 Оператор" }],
+            [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+          ]),
+        });
       }
       return { ok: true };
     }

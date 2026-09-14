@@ -30,11 +30,15 @@ export function isValidUzPhone(raw: string): boolean {
 }
 
 export function isValidPhone(raw: string): boolean {
-  const digits = raw.replace(/\D/g, "");
-  if (digits.length < 8 || digits.length > 15) return false;
+  const trimmed = (raw ?? "").trim();
+  if (!trimmed) return false;
+  if (/^[+\-–—_.]+$/.test(trimmed)) return false;
+  const digits = trimmed.replace(/\D/g, "");
+  if (digits.length < 9 || digits.length > 15) return false;
   if (digits.startsWith("998")) return digits.length === 12;
-  if (digits.length === 9 && /^[6798]/.test(digits)) return true;
-  return digits.length >= 8;
+  if (digits.length === 9) return /^[679]\d{8}$/.test(digits);
+  if (digits.startsWith("7") && digits.length === 11) return true;
+  return false;
 }
 
 export function nowTime(): string {
