@@ -1,6 +1,6 @@
 import { getSql } from "@/lib/db";
 import { DISTRICTS, districtById, serviceById } from "@/lib/catalog";
-import { clientLabel, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
+import { clientLabel, formatSum, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
 import { emptyDraft, reduceBot, statusReply, clientMenu, liveMenu, masterMenu, labelToTapId, type BotEvent } from "@/lib/bot";
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
@@ -8,7 +8,6 @@ import type { Sql, StaffWho } from "./workspace";
 import { trackRefEvent } from "./refs";
 import { formatGeoCard, isInsideServiceArea, isTashkentDistrictName, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
 import { displayArea, formatClientHome, formatHowTo, formatOpError, HR, statusLine, svcTitle } from "@/lib/tg-ui";
-import { formatSum } from "@/lib/domain";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number };
@@ -625,6 +624,14 @@ export function startPoller(token: string, webhookId: string, secret: string) {
   pollers.set(token, { stop: () => { alive = false; } });
   void (async () => {
     try { await tg(token, "deleteWebhook", { drop_pending_updates: false }); } catch { /* ignore */ }
+    try {
+      await tg(token, "setMyCommands", {
+        commands: [
+          { command: "start", description: "Главное меню" },
+          { command: "cancel", description: "Отменить заявку" },
+        ],
+      });
+    } catch { /* ignore */ }
     let offset = 0;
     while (alive) {
       try {
@@ -1894,19 +1901,33 @@ async function clientPaidSum(sql: Sql, uid: string, chatId: string): Promise<num
 }
 
 async function sendHome(sql: Sql, uid: string, token: string, chatId: string, name: string, lang: string, live: boolean) {
-  const c = await sql<{ name: string; city: string; district: string; lat: number | null; lng: number | null }>`
-    select name, city, district, lat, lng from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
-  `;
-  const row = c[0];
-  const city = displayArea(row?.city || row?.district, row?.lat, row?.lng, lang === "uz" ? "uz" : "ru");
-  const balance = await clientPaidSum(sql, uid, chatId);
-  const text = formatClientHome({
-    name: row?.name || name,
-    city: city === "не определён" || city === "aniqlanmadi" ? SERVICE_CITY : city,
-    balance,
-    lang: lang === "uz" ? "uz" : "ru",
+  const L = lang === "uz" ? "uz" as const : "ru" as const;
+  let city = SERVICE_CITY;
+  let shown = name;
+  let balance = 0;
+  try {
+    const c = await sql<{ name: string; district: string; lat: number | null; lng: number | null }>`
+      select name, district, lat, lng from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
+    `;
+    const row = c[0];
+    shown = row?.name || name;
+    city = displayArea(row?.district, row?.lat, row?.lng, L);
+    if (city === "не определён" || city === "aniqlanmadi") city = SERVICE_CITY;
+    balance = await clientPaidSum(sql, uid, chatId);
+  } catch { /* show defaults */ }
+  const text = formatClientHome({ name: shown, city, balance, lang: L });
+  const sent = await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text,
+    reply_markup: markup(navKb(lang, live)),
   });
-  await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(navKb(lang, live)) });
+  if (!sent.ok) {
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: L === "uz" ? "🔧 ALL SERVIS\nBosh menyu." : "🔧 ALL SERVIS\nГлавное меню.",
+      reply_markup: markup(navKb(lang, live)),
+    });
+  }
 }
 
 async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
@@ -2008,10 +2029,10 @@ async function sendReviews(sql: Sql, uid: string, token: string, chatId: string,
 
 async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
   const mine = await sql<{
-    id: number; public_no: number; status: string; district: string; city: string; address: string;
+    id: number; public_no: number; status: string; district: string;
     category_slug: string; master_name: string | null; lat: number | null; lng: number | null; created_at: string;
   }>`
-    select o.id, o.public_no, o.status, o.district, o.city, o.address, o.category_slug, o.lat, o.lng,
+    select o.id, o.public_no, o.status, o.district, o.category_slug, o.lat, o.lng,
       o.created_at::text as created_at,
       nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') as master_name
     from as_orders o
@@ -2033,7 +2054,7 @@ async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: st
     return;
   }
   const blocks = mine.map((x) => {
-    const area = displayArea(x.district || x.city, x.lat, x.lng, L ? "uz" : "ru");
+    const area = displayArea(x.district, x.lat, x.lng, L ? "uz" : "ru");
     const when = x.created_at ? new Date(x.created_at).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
     return [
       `${statusLine(x.status, L ? "uz" : "ru").slice(0, 2)} Заявка №${x.public_no}`.replace("Заявка", L ? "Ariza" : "Заявка"),
@@ -2055,11 +2076,11 @@ async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: st
 
 async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId: string, orderId: number, lang: string, live: boolean) {
   const rows = await sql<{
-    id: number; public_no: number; status: string; district: string; city: string; address: string;
+    id: number; public_no: number; status: string; district: string;
     category_slug: string; description: string; lat: number | null; lng: number | null; created_at: string;
     master_name: string | null; master_phone: string | null; rating: number | null;
   }>`
-    select o.id, o.public_no, o.status, o.district, o.city, o.address, o.category_slug, o.description,
+    select o.id, o.public_no, o.status, o.district, o.category_slug, o.description,
       o.lat, o.lng, o.created_at::text as created_at,
       nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') as master_name,
       m.phone as master_phone, m.rating
@@ -2074,7 +2095,7 @@ async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId:
     await tg(token, "sendMessage", { chat_id: Number(chatId), text: formatOpError(L ? "uz" : "ru"), reply_markup: markup(navKb(lang, live)) });
     return;
   }
-  const area = displayArea(o.district || o.city, o.lat, o.lng, L ? "uz" : "ru");
+  const area = displayArea(o.district, o.lat, o.lng, L ? "uz" : "ru");
   const when = o.created_at ? new Date(o.created_at).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
   const text = [
     L ? `📦 ARIZA №${o.public_no}` : `📦 ЗАЯВКА №${o.public_no}`,
@@ -2092,9 +2113,6 @@ async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId:
     "",
     L ? "📍 Tuman/mahalla:" : "📍 Район/махалля:",
     area,
-    "",
-    L ? "🏠 Manzil:" : "🏠 Адрес:",
-    o.address && !isTashkentDistrictName(o.address) ? o.address : (L ? "aniqlanmadi" : "не определён"),
     "",
     HR,
     "",
@@ -2125,10 +2143,10 @@ async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId:
 
 async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean) {
   const c = await sql<{
-    name: string; phone: string; district: string; city: string; lat: number | null; lng: number | null;
+    name: string; phone: string; district: string; lat: number | null; lng: number | null;
     orders_count: number; completed_count: number; last_master: string | null; last_no: number | null; last_status: string | null;
   }>`
-    select cl.name, cl.phone, cl.district, cl.city, cl.lat, cl.lng,
+    select cl.name, cl.phone, cl.district, cl.lat, cl.lng,
       (select count(*)::int from as_orders o where o.client_id = cl.id) as orders_count,
       (select count(*)::int from as_orders o where o.client_id = cl.id and o.status = 'completed') as completed_count,
       (select nullif(trim(concat_ws(' ', m.first_name, m.last_name)), '') from as_orders o
@@ -2143,10 +2161,10 @@ async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: s
   `;
   const row = c[0];
   const L = lang === "uz";
-  const area = displayArea(row?.district || row?.city, row?.lat, row?.lng, L ? "uz" : "ru");
+  const area = displayArea(row?.district, row?.lat, row?.lng, L ? "uz" : "ru");
   const cityShow = (row?.lat != null && row?.lng != null && isInsideServiceArea(Number(row.lat), Number(row.lng)))
     ? SERVICE_CITY
-    : (isTashkentDistrictName(row?.district) || isTashkentDistrictName(row?.city) ? (L ? "aniqlanmadi" : "не определён") : (row?.city && !isTashkentDistrictName(row.city) ? row.city : SERVICE_CITY));
+    : (isTashkentDistrictName(row?.district) ? (L ? "aniqlanmadi" : "не определён") : SERVICE_CITY);
   const active = (row?.orders_count ?? 0) - (row?.completed_count ?? 0);
   const balance = await clientPaidSum(sql, uid, chatId);
   const geoLine = (row?.lat != null && row?.lng != null && isInsideServiceArea(Number(row.lat), Number(row.lng)))
@@ -2499,15 +2517,25 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     });
     return { ok: true };
   }
-  if ((tapGuess === "cmd:menu" || msg?.text === "/start") && !live && draft.role !== "master" && (draft.phone || step === "category" || step === "idle")) {
+  if ((tapGuess === "cmd:menu" || msg?.text === "/start") && !live && draft.role !== "master") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    await persistProfile(sql, uid, chatId, name, draft);
-    await sendHome(sql, uid, token, chatId, name, lang, false);
-    await sql`
-      insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
-      values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
-      on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, tg_name = ${name}, updated_at = now()
-    `;
+    try { await persistProfile(sql, uid, chatId, name, draft); } catch { /* ignore */ }
+    try {
+      await sendHome(sql, uid, token, chatId, name, lang, false);
+    } catch {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: formatClientHome({ name, city: SERVICE_CITY, balance: 0, lang: lang === "uz" ? "uz" : "ru" }),
+        reply_markup: markup(clientMenu(lang === "uz" ? "uz" : "ru")),
+      });
+    }
+    try {
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${"category"}, ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${"category"}, draft = ${JSON.stringify({ ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined })}, tg_name = ${name}, updated_at = now()
+      `;
+    } catch { /* ignore */ }
     return { ok: true };
   }
   try {
