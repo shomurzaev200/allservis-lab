@@ -665,22 +665,30 @@ export async function resumeBots(sql: Sql, userId: string) {
       select bot_token, webhook_id, bot_secret, poll_mode, public_origin from as_workspace where user_id = ${userId}
     `;
     const w = ws[0];
-    const https = Boolean(w?.public_origin?.startsWith("https://"));
-    const shouldPoll = Boolean(w?.poll_mode) || !https;
-    if (shouldPoll && w?.bot_token && w.webhook_id && w.bot_secret) {
+    if (w?.bot_token && w.webhook_id && w.bot_secret) {
       startPoller(w.bot_token, w.webhook_id, w.bot_secret);
     }
     const extras = await sql<{ bot_token: string | null; webhook_id: string | null; bot_secret: string | null }>`
       select bot_token, webhook_id, bot_secret from as_bots
       where user_id = ${userId} and bot_token is not null and webhook_id is not null
     `;
-    if (shouldPoll) {
-      for (const b of extras) {
-        if (b.bot_token && b.webhook_id && b.bot_secret) startPoller(b.bot_token, b.webhook_id, b.bot_secret);
-      }
+    for (const b of extras) {
+      if (b.bot_token && b.webhook_id && b.bot_secret) startPoller(b.bot_token, b.webhook_id, b.bot_secret);
     }
   } catch {
     /* columns may not exist until migration */
+  }
+}
+
+export async function resumeAllBots(sql: Sql) {
+  try {
+    const rows = await sql<{ user_id: string }>`
+      select user_id from as_workspace where bot_token is not null and webhook_id is not null
+    `;
+    for (const r of rows) await resumeBots(sql, r.user_id);
+    if (rows.length) console.log(`[allservis] telegram pollers: ${rows.length} workspace(s)`);
+  } catch (err) {
+    console.error("[allservis] resumeAllBots failed:", err);
   }
 }
 
@@ -1834,6 +1842,42 @@ function kbClient(lang: string | undefined, live: boolean) {
   return live ? liveMenu(lang === "uz" ? "uz" : "ru") : clientMenu(lang === "uz" ? "uz" : "ru");
 }
 
+function isStartCmd(text?: string | null) {
+  return Boolean(text && /^\/start(?:@[A-Za-z0-9_]+)?(?:\s|$)/i.test(text.trim()));
+}
+
+function parseDraftSafe(raw: string | null | undefined): Draft {
+  try {
+    if (!raw) return emptyDraft();
+    const d = JSON.parse(raw) as Draft;
+    return { ...emptyDraft(), ...d };
+  } catch {
+    return emptyDraft();
+  }
+}
+
+async function replyHomeAlways(
+  sql: Sql,
+  uid: string,
+  token: string,
+  chatId: string,
+  name: string,
+  lang: string,
+  live: boolean,
+) {
+  try {
+    await sendHome(sql, uid, token, chatId, name, lang, live);
+  } catch {
+    try {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: lang === "uz" ? "🔧 ALL SERVIS\nBosh menyu." : "🔧 ALL SERVIS\nГлавное меню.",
+        reply_markup: markup(clientMenu(lang === "uz" ? "uz" : "ru")),
+      });
+    } catch { /* last resort */ }
+  }
+}
+
 async function pushSupportAlert(
   sql: Sql,
   uid: string,
@@ -2366,6 +2410,39 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   }
 
   const name = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Клиент Telegram";
+  const rawText = (msg?.text ?? "").trim();
+  const tapEarly = cb?.data ?? (rawText ? labelToTapId(rawText) : null);
+  if (isStartCmd(rawText) || tapEarly === "cmd:menu") {
+    let lang: "ru" | "uz" = "ru";
+    let live = false;
+    try {
+      const sess0 = await sql<{ step: string; draft: string; live_order_id: number | null; last_status: string | null }>`
+        select step, draft, live_order_id, last_status from as_tg_sessions where user_id = ${uid} and chat_id = ${chatId}
+      `;
+      const d0 = parseDraftSafe(sess0[0]?.draft);
+      lang = d0.lang === "uz" ? "uz" : "ru";
+      live = Boolean(sess0[0]?.live_order_id) || sess0[0]?.step === "live";
+      const payload = isStartCmd(rawText) ? rawText.replace(/^\/start(?:@[A-Za-z0-9_]+)?/i, "").trim() : "";
+      if (payload) {
+        try {
+          await persistProfile(sql, uid, chatId, name, d0);
+          await applyStartPayload(sql, uid, chatId, payload);
+          await trackRefEvent(sql, uid, payload, "start", chatId);
+        } catch { /* ignore */ }
+      }
+      const nextDraft = { ...d0, name, role: live ? d0.role : "client", photos: [] as string[], problem: undefined, serviceId: undefined, comment: undefined };
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${live ? "live" : "category"}, ${JSON.stringify(nextDraft)}, ${sess0[0]?.live_order_id ?? null}, ${sess0[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${live ? "live" : "category"}, draft = ${JSON.stringify(nextDraft)}, tg_name = ${name}, updated_at = now()
+      `;
+    } catch { /* still reply */ }
+    if (cb?.data) {
+      try { await tg(token, "answerCallbackQuery", { callback_query_id: cb.id }); } catch { /* ignore */ }
+    }
+    await replyHomeAlways(sql, uid, token, chatId, name, lang, live);
+    return { ok: true };
+  }
 
   if (await gated(sql, uid, token, chatId, from, msg, cb)) return { ok: true };
   if (cb?.data === "sub:ok") {
@@ -2410,7 +2487,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   `;
   let step = (sess[0]?.step ?? "lang") as ChatStep;
   if (step === "live" && sess[0]?.last_status === "completed") step = "rate";
-  let draft: Draft = sess[0]?.draft ? (JSON.parse(sess[0].draft) as Draft) : emptyDraft();
+  let draft: Draft = parseDraftSafe(sess[0]?.draft);
   draft = { ...emptyDraft(), ...draft, name };
   const live = Boolean(sess[0]?.live_order_id) || step === "live";
   const lang = draft.lang === "uz" ? "uz" : "ru";

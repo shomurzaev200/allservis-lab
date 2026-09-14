@@ -275,9 +275,19 @@ const globalBoot = globalThis as typeof globalThis & {
   __pgBootstrapPromise__?: Promise<void>;
 };
 if (typeof window === "undefined") {
-  globalBoot.__pgBootstrapPromise__ ??= ensureDbReady().catch((err) => {
-    globalBoot.__pgBootstrapPromise__ = undefined;
-    console.error("[db] bootstrap failed:", err);
-    throw err;
-  });
+  globalBoot.__pgBootstrapPromise__ ??= ensureDbReady()
+    .then(async () => {
+      try {
+        const { resumeAllBots } = await import("./server/telegram");
+        const sql = await getSql();
+        await resumeAllBots(sql);
+      } catch (err) {
+        console.error("[db] telegram pollers:", err);
+      }
+    })
+    .catch((err) => {
+      globalBoot.__pgBootstrapPromise__ = undefined;
+      console.error("[db] bootstrap failed:", err);
+      throw err;
+    });
 }
