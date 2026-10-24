@@ -7,6 +7,10 @@ import { Input } from "@/components/ui/input";
 
 export const Route = createFileRoute("/login")({ component: Login });
 
+function sessionToken(data: { token?: string | null; session?: { token?: string | null } | null } | null | undefined) {
+  return data?.token || data?.session?.token || null;
+}
+
 function authErrorText(err: { message?: string; status?: number; code?: string } | null, fallback: string) {
   if (!err) return fallback;
   const bits = [err.status ? String(err.status) : "", err.code ?? "", err.message ?? ""].filter(Boolean);
@@ -34,14 +38,18 @@ function Login() {
           name: "Оператор",
         });
         if (err) throw new Error(authErrorText(err, "Не удалось создать аккаунт"));
-        if (data?.token) persistSessionToken(data.token);
+        const token = sessionToken(data);
+        if (!token) throw new Error("Аккаунт создан, но сессия не выдана. Нажмите «Войти».");
+        persistSessionToken(token);
       } else {
         const { data, error: err } = await authClient.signIn.email({
           email,
           password,
         });
         if (err) throw new Error(authErrorText(err, "Неверный email или пароль"));
-        if (data?.token) persistSessionToken(data.token);
+        const token = sessionToken(data);
+        if (!token) throw new Error("Сервер не выдал сессию. Обновите страницу и войдите снова.");
+        persistSessionToken(token);
       }
       window.location.assign("/admin");
     } catch (err) {

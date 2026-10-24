@@ -113,17 +113,44 @@ const baseURL = explicitBaseURL ?? {
   fallback: "http://localhost:8080",
 };
 
+/**
+ * A public `http://IP:8080` VPS cannot store `__Host-` or `Secure` cookies.
+ * Browsers drop them, so email sign-in succeeds on the server and then the
+ * admin page looks signed-out. Loopback and HTTPS keep the locked-down names.
+ */
+const httpVps = Boolean(
+  explicitBaseURL &&
+    explicitBaseURL.startsWith("http://") &&
+    !/^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/.test(explicitBaseURL),
+);
+
+function originMatchingHost(request?: Request): string[] {
+  if (!request) return [];
+  const origin = request.headers.get("origin");
+  const host = request.headers.get("host");
+  if (!origin || !host) return [];
+  try {
+    if (new URL(origin).host === host) return [origin];
+  } catch {
+    /* malformed Origin */
+  }
+  return [];
+}
+
 // Origins Better Auth accepts on credentialed POSTs (sign-up/sign-in, etc.).
-// Missing entries here surface as FORBIDDEN "Invalid origin".
-const trustedOrigins: string[] = explicitBaseURL
-  ? [explicitBaseURL, ...LOCAL_DEV_ORIGINS]
-  : [
-      // Host wildcards (matched against Origin's host)
-      ...previewAllowedHosts,
-      // Full-origin wildcards (matched against Origin)
-      ...previewAllowedHosts.flatMap((host) => [`https://${host}`, `http://${host}`]),
-      ...LOCAL_DEV_ORIGINS,
-    ];
+// Missing entries here surface as FORBIDDEN "Invalid origin". On a VPS the
+// public IP in BETTER_AUTH_URL can differ from the host the browser used, so
+// a same-origin request (Origin host == Host) is always trusted.
+const trustedOrigins = async (request?: Request): Promise<string[]> => {
+  const listed = explicitBaseURL
+    ? [explicitBaseURL, ...LOCAL_DEV_ORIGINS]
+    : [
+        ...previewAllowedHosts,
+        ...previewAllowedHosts.flatMap((host) => [`https://${host}`, `http://${host}`]),
+        ...LOCAL_DEV_ORIGINS,
+      ];
+  return [...new Set([...listed, ...originMatchingHost(request)])];
+};
 
 const databaseUrl = env("DATABASE_URL");
 
@@ -146,7 +173,9 @@ const database = databaseUrl
   : { dialect: pgliteDialect(() => getPglite()), type: "postgres" as const };
 
 /** Session token cookie name — also read by the live-preview popup completion page. */
-export const SESSION_TOKEN_COOKIE = "__Host-grok-auth.session_token";
+export const SESSION_TOKEN_COOKIE = httpVps
+  ? "allservis.session_token"
+  : "__Host-grok-auth.session_token";
 
 // Built separately so the `betterAuth({...})` call stays easy to edit without
 // breaking brackets (models often trip on the conditional plugin spread).
@@ -210,24 +239,23 @@ export const auth = betterAuth({
   // flicker-prevention guidance (gate on `isPending`; SSR the session).
   session: { cookieCache: { enabled: true, maxAge: 300 } },
 
+  // One shared bucket locks the whole VPS out after a few sign-in tries, because
+  // Vite does not expose a client IP. Email/password on HTTP does not need it.
+  ...(httpVps ? { rateLimit: { enabled: false } } : {}),
+
   // Local email/password — toggled only via `./email-password` (not a plugin).
   ...(emailAndPasswordEnabled ? { emailAndPassword: { enabled: true } } : {}),
 
-  // `__Host-` prefixed cookies: the browser REFUSES any same-named cookie that
-  // carries a `Domain` attribute, so a sibling `*.grok.me` app cannot "toss" a
-  // `Domain=.grok.me` session cookie onto this app. `__Host-` requires Secure +
-  // Path=/ + no Domain; Better Auth otherwise uses `__Secure-` (which permits
-  // Domain), so we drop its auto prefix (`useSecureCookies: false`) and set
-  // Secure + the names ourselves. (Browsers allow Secure cookies on
-  // `http://localhost`, so local dev still works.)
+  // `__Host-` cookies are rejected by every browser on http://public-ip.
+  // HTTPS and localhost keep Secure + `__Host-`. HTTP VPS uses plain names.
   advanced: {
     useSecureCookies: false,
-    defaultCookieAttributes: { secure: true, sameSite: "lax", path: "/" },
+    defaultCookieAttributes: { secure: !httpVps, sameSite: "lax", path: "/" },
     cookies: {
       session_token: { name: SESSION_TOKEN_COOKIE },
-      session_data: { name: "__Host-grok-auth.session_data" },
-      account_data: { name: "__Host-grok-auth.account_data" },
-      dont_remember: { name: "__Host-grok-auth.dont_remember" },
+      session_data: { name: httpVps ? "allservis.session_data" : "__Host-grok-auth.session_data" },
+      account_data: { name: httpVps ? "allservis.account_data" : "__Host-grok-auth.account_data" },
+      dont_remember: { name: httpVps ? "allservis.dont_remember" : "__Host-grok-auth.dont_remember" },
     },
   },
 

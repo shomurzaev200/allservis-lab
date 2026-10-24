@@ -1,3 +1,4 @@
+import { setDefaultResultOrder } from "node:dns";
 import { getSql } from "@/lib/db";
 import { DISTRICTS, districtById, serviceById } from "@/lib/catalog";
 import { clientLabel, formatSum, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
@@ -36,14 +37,28 @@ type TgUpdate = {
 
 const TG_UPDATES = ["message", "callback_query", "my_chat_member", "channel_post"];
 
+// AWS often resolves api.telegram.org to IPv6 first. Egress is IPv4-only, so
+// Node's fetch dies with "fetch failed" while curl (IPv4) works.
+setDefaultResultOrder("ipv4first");
+
 async function tg(token: string, method: string, body: Record<string, unknown>) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const json = (await res.json()) as { ok: boolean; description?: string; result?: Record<string, unknown> | unknown[] };
-  return json;
+  try {
+    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(method === "getUpdates" ? 40_000 : 15_000),
+    });
+    const json = (await res.json()) as { ok: boolean; description?: string; result?: Record<string, unknown> | unknown[] };
+    return json;
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "fetch failed";
+    const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : "";
+    return {
+      ok: false as const,
+      description: `Нет связи с Telegram: ${message}${cause ? ` (${cause})` : ""}`,
+    };
+  }
 }
 
 function markup(buttons?: KeyboardButton[][]) {
