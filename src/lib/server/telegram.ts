@@ -2408,6 +2408,24 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const chatId = String(msg?.chat.id ?? cb?.message?.chat.id ?? from?.id ?? "");
   if (!chatId || !from) return { ok: true };
 
+  if (kind !== "logs") {
+    const tgName = [from.first_name, from.last_name].filter(Boolean).join(" ") || "Telegram";
+    const username = from.username ? `@${from.username}` : null;
+    try {
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, tg_name, tg_username, started_at, updated_at)
+        values (${uid}, ${chatId}, ${"lang"}, ${"{}"}, ${tgName}, ${username}, now(), now())
+        on conflict (user_id, chat_id) do update set
+          tg_name = excluded.tg_name,
+          tg_username = coalesce(excluded.tg_username, as_tg_sessions.tg_username),
+          started_at = coalesce(as_tg_sessions.started_at, excluded.started_at),
+          updated_at = now()
+      `;
+    } catch {
+      /* columns appear after migration */
+    }
+  }
+
   const fwd = msg?.forward_from_chat ?? (msg?.forward_origin?.chat ?? null);
   if (fwd && (fwd.type === "channel" || fwd.type === "supergroup")) {
     if (fwd.username) {

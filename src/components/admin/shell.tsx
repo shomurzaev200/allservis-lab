@@ -10,6 +10,7 @@ const NAV: { to: string; label: string; icon: typeof LayoutDashboard; perm?: Per
   { to: "/admin/orders", label: "Заявки", icon: ClipboardList },
   { to: "/admin/masters", label: "Мастера", icon: Wrench },
   { to: "/admin/clients", label: "Клиенты", icon: Users },
+  { to: "/admin/people", label: "Кто нажал /start", icon: Users },
   { to: "/admin/map", label: "Карта", icon: Map },
   { to: "/admin/analytics", label: "Аналитика", icon: LayoutDashboard },
   { to: "/admin/targetolog", label: "Таргетолог", icon: Target },

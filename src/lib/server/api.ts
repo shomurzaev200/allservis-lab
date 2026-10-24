@@ -1198,4 +1198,158 @@ export const createRefLink = createServerFn({ method: "POST" })
     return { ok: true as const, code, link, error: null as string | null };
   });
 
+const STEP_RU: Record<string, string> = {
+  lang: "выбор языка",
+  role: "выбор: клиент или мастер",
+  category: "меню после /start",
+  problem: "описывает проблему",
+  photo: "ждёт фото",
+  geo_choice: "выбор геолокации",
+  district: "выбирает район",
+  geo: "отправляет геолокацию",
+  phone: "ждёт телефон",
+  comment: "комментарий к заявке",
+  confirm: "подтверждает заявку",
+  live: "есть активная заявка",
+  support: "написал в поддержку",
+  rate: "ставит оценку",
+  idle: "в меню",
+  master_spec: "мастер: не указал специализацию",
+  master_phone: "мастер: не отправил телефон",
+  master_geo: "мастер: не отправил геолокацию",
+};
+
+type PersonDraft = {
+  name?: string;
+  phone?: string;
+  lang?: string;
+  role?: string;
+  city?: string;
+  neighborhood?: string;
+  districtId?: string;
+  fullAddress?: string;
+};
+
+export const listBotPeople = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .handler(async ({ context }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const rows = await sql<{
+      telegram_id: string | null;
+      tg_name: string | null;
+      tg_username: string | null;
+      step: string | null;
+      draft: string | null;
+      started_at: string | null;
+      session_at: string | null;
+      client_id: number | null;
+      client_name: string | null;
+      client_phone: string | null;
+      client_district: string | null;
+      client_lang: string | null;
+      client_role: string | null;
+      paid: boolean | null;
+      blocked: boolean | null;
+      client_created: string | null;
+      ref_code: string | null;
+      referred_by: string | null;
+      orders_count: number | null;
+      master_id: number | null;
+      master_first: string | null;
+      master_last: string | null;
+      master_phone: string | null;
+      specialization: string | null;
+      online_status: string | null;
+      master_registered: string | null;
+      master_city: string | null;
+      master_district: string | null;
+    }>`
+      select
+        coalesce(s.chat_id, c.telegram_id, m.telegram_id) as telegram_id,
+        s.tg_name,
+        s.tg_username,
+        s.step,
+        s.draft,
+        s.started_at,
+        s.updated_at as session_at,
+        c.id as client_id,
+        c.name as client_name,
+        c.phone as client_phone,
+        c.district as client_district,
+        c.lang as client_lang,
+        c.role as client_role,
+        coalesce(c.paid, false) as paid,
+        coalesce(c.blocked, false) as blocked,
+        c.created_at as client_created,
+        c.ref_code,
+        c.referred_by,
+        (select count(*)::int from as_orders o where o.client_id = c.id) as orders_count,
+        m.id as master_id,
+        m.first_name as master_first,
+        m.last_name as master_last,
+        m.phone as master_phone,
+        m.specialization,
+        m.online_status,
+        m.registered_at as master_registered,
+        m.city as master_city,
+        m.district as master_district
+      from (select * from as_tg_sessions where user_id = ${uid}) s
+      full outer join (
+        select * from as_clients
+        where user_id = ${uid}
+          and length(coalesce(telegram_id, '')) >= 5
+          and name <> ${"Удалён"}
+      ) c on c.telegram_id = s.chat_id
+      full outer join (
+        select * from as_masters
+        where user_id = ${uid} and length(coalesce(telegram_id, '')) >= 5
+      ) m on m.telegram_id = coalesce(s.chat_id, c.telegram_id)
+      order by coalesce(s.updated_at, m.last_seen, m.registered_at, c.created_at) desc
+    `;
+
+    return rows.flatMap((row) => {
+      const telegramId = row.telegram_id ?? "";
+      if (telegramId.length < 5) return [];
+      let draft: PersonDraft = {};
+      try {
+        draft = JSON.parse(row.draft || "{}") as PersonDraft;
+      } catch {
+        draft = {};
+      }
+      const master = Boolean(row.master_id);
+      const registeringMaster = !master && (row.step ?? "").startsWith("master_");
+      const phone = (master ? row.master_phone : row.client_phone) || draft.phone || "";
+      const finishedClient = Boolean(row.client_id) && phone.trim().length >= 5;
+      const role = master && row.client_id ? "both" : master || registeringMaster ? "master" : "client";
+      const stage = master
+        ? "зарегистрирован"
+        : registeringMaster
+          ? "регистрация не закончена"
+          : finishedClient
+            ? "зарегистрирован"
+            : "только /start";
+      const name = master
+        ? [row.master_first, row.master_last].filter(Boolean).join(" ")
+        : row.client_name || row.tg_name || draft.name || "Без имени";
+      return [{
+        telegramId,
+        username: row.tg_username || "",
+        name,
+        role,
+        stage,
+        step: STEP_RU[row.step ?? ""] ?? (row.step || "нет сессии"),
+        phone,
+        lang: row.client_lang || draft.lang || "",
+        place: [row.master_district || row.client_district || draft.neighborhood || draft.districtId || "", row.master_city || draft.city || ""].filter(Boolean).join(", "),
+        specialization: row.specialization || "",
+        online: row.online_status || "",
+        orders: row.orders_count ?? 0,
+        paid: Boolean(row.paid),
+        blocked: Boolean(row.blocked),
+        ref: row.referred_by || "",
+        seenAt: row.session_at || row.master_registered || row.client_created || row.started_at,
+      }];
+    });
+  });
+
 export { SERVICES, clientLabel };
