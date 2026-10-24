@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { cancelOrder, listOrders } from "@/lib/server/api";
@@ -24,13 +24,19 @@ function OrdersPage() {
   const search = Route.useSearch();
   const [status, setStatus] = useState(search.status ?? "all");
   const [q, setQ] = useState(search.q ?? "");
+  const [debounced, setDebounced] = useState(q);
   const [assign, setAssign] = useState<{ id: number; no: number; name: string } | null>(null);
   const qc = useQueryClient();
   const access = useAccess();
   const canAssign = access.allowed("assign");
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(q), 300);
+    return () => window.clearTimeout(t);
+  }, [q]);
   const { data = [], isPending } = useQuery({
-    queryKey: ["orders", status, q],
-    queryFn: () => listOrders({ data: { status, q } }),
+    queryKey: ["orders", status, debounced],
+    queryFn: () => listOrders({ data: { status, q: debounced } }),
+    refetchInterval: 15_000,
   });
   const cancel = useMutation({
     mutationFn: (id: number) => cancelOrder({ data: id }),
@@ -56,11 +62,20 @@ function OrdersPage() {
       ) : null}
       <div className="flex flex-wrap gap-2">
         <FilterChip id="all" label="Все" cur={status} set={setStatus} />
-        <FilterChip id="waiting" label="Ожидают" cur={status} set={setStatus} />
+        <FilterChip id="waiting" label="Ждут вас" cur={status} set={setStatus} />
         <FilterChip id="work" label="В работе" cur={status} set={setStatus} />
-        {ORDER_STATUSES.map((s) => (
-          <FilterChip key={s} id={s} label={STATUS_LABEL[s]} cur={status} set={setStatus} />
-        ))}
+        <FilterChip id="completed" label="Завершены" cur={status} set={setStatus} />
+        <FilterChip id="cancelled" label="Отмены" cur={status} set={setStatus} />
+        <select
+          value={ORDER_STATUSES.includes(status as (typeof ORDER_STATUSES)[number]) ? status : ""}
+          onChange={(e) => setStatus(e.target.value || "all")}
+          className="h-9 rounded-full bg-surface-2 px-3 text-xs text-muted"
+        >
+          <option value="">Точный статус</option>
+          {ORDER_STATUSES.map((s) => (
+            <option key={s} value={s}>{STATUS_LABEL[s]}</option>
+          ))}
+        </select>
       </div>
       <div className="overflow-x-auto rounded-xl border border-border">
         <table className="w-full min-w-[56rem] text-left text-sm">
@@ -68,6 +83,7 @@ function OrdersPage() {
             <tr>
               <th className="px-3 py-3">ID</th>
               <th className="px-3 py-3">Клиент</th>
+              <th className="px-3 py-3">Телефон</th>
               <th className="px-3 py-3">Категория</th>
               <th className="px-3 py-3">Мастер</th>
               <th className="px-3 py-3">Статус</th>
@@ -80,14 +96,14 @@ function OrdersPage() {
           <tbody>
             {isPending ? (
               <tr>
-                <td className="px-3 py-8 text-muted" colSpan={9}>
+                <td className="px-3 py-8 text-muted" colSpan={10}>
                   Загрузка…
                 </td>
               </tr>
             ) : null}
             {!isPending && data.length === 0 ? (
               <tr>
-                <td className="px-3 py-8 text-muted" colSpan={9}>
+                <td className="px-3 py-8 text-muted" colSpan={10}>
                   Нет заявок по фильтру
                 </td>
               </tr>
@@ -96,6 +112,9 @@ function OrdersPage() {
               <tr key={o.id} className="border-t border-border">
                 <td className="px-3 py-3 font-mono text-xs">№{o.public_no}</td>
                 <td className="px-3 py-3">{o.client_name}</td>
+                <td className="px-3 py-3 font-mono text-xs">
+                  {o.phone ? <a className="text-accent" href={`tel:${o.phone.replace(/[^\d+]/g, "")}`}>{o.phone}</a> : "—"}
+                </td>
                 <td className="px-3 py-3">{serviceById(o.category_slug)?.title}</td>
                 <td className="px-3 py-3">{o.master_name ?? "—"}</td>
                 <td className="px-3 py-3">
@@ -117,7 +136,13 @@ function OrdersPage() {
                       </Button>
                     ) : null}
                     {canAssign && o.status !== "completed" && o.status !== "cancelled" ? (
-                      <Button size="sm" variant="outline" onClick={() => cancel.mutate(o.id)}>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() => {
+                          if (window.confirm(`Отменить заявку №${o.public_no}? Клиент увидит отмену.`)) cancel.mutate(o.id);
+                        }}
+                      >
                         Отмена
                       </Button>
                     ) : null}

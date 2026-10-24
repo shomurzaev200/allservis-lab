@@ -78,7 +78,9 @@ function PeoplePage() {
                   <p className={p.stage === "зарегистрирован" ? "text-ok" : "text-warn"}>{p.stage}</p>
                   <p className="text-xs text-muted">{p.step}</p>
                 </td>
-                <td className="px-3 py-3 font-mono text-xs">{p.phone || "—"}</td>
+                <td className="px-3 py-3 font-mono text-xs">
+                  {p.phone ? <a className="text-accent" href={`tel:${p.phone.replace(/[^\d+]/g, "")}`}>{p.phone}</a> : "—"}
+                </td>
                 <td className="px-3 py-3 text-xs">{p.place || "—"}{p.lang ? ` · ${p.lang}` : ""}</td>
                 <td className="px-3 py-3 text-xs">
                   {p.role === "client" ? (

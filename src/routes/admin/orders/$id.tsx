@@ -36,6 +36,7 @@ function OrderPage() {
   const { data, isPending } = useQuery({
     queryKey: ["order", orderId],
     queryFn: () => getOrder({ data: orderId }),
+    refetchInterval: 15_000,
   });
   const [assign, setAssign] = useState(false);
   const cancel = useMutation({
@@ -72,8 +73,16 @@ function OrderPage() {
         <section className="glass-card rounded-xl p-4">
           <h2 className="text-sm font-medium text-muted">Клиент</h2>
           <p className="mt-2">{o.client_name}</p>
-          <p className="text-sm text-muted">{o.phone}</p>
-          <p className="text-sm text-muted">Telegram: {o.client_tg ?? "—"}</p>
+          <p className="text-sm">
+            {o.phone ? <a className="text-accent" href={`tel:${o.phone.replace(/[^\d+]/g, "")}`}>{o.phone}</a> : <span className="text-muted">телефон не указан</span>}
+          </p>
+          <p className="text-sm text-muted">
+            Telegram: {o.client_tg ? (
+              <a className="text-accent" href={/^\d+$/.test(o.client_tg) ? `tg://user?id=${o.client_tg}` : `https://t.me/${o.client_tg.replace(/^@/, "")}`}>
+                {o.client_tg}
+              </a>
+            ) : "—"}
+          </p>
           <p className="text-sm text-muted">Рейтинг клиента: {(o.client_rating ?? 5).toFixed(1)}</p>
           <p className="text-sm text-muted">Заявок в истории: {data.clientOrders}</p>
         </section>

@@ -194,6 +194,12 @@ export const getDashboard = createServerFn({ method: "GET" })
       `select ${ORDER_SELECT} from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id where o.user_id = $1 order by o.created_at desc limit 8`,
       [uid],
     );
+    const queueRows = await sql.query<Record<string, unknown>>(
+      `select ${ORDER_SELECT} from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
+       where o.user_id = $1 and o.status in ('waiting_admin','master_rejected')
+       order by o.created_at asc limit 20`,
+      [uid],
+    );
     const notes = await sql<NoteRow>`select id, kind, title, body, order_id, master_id, read, created_at from as_notifications where user_id = ${uid} order by created_at desc limit 8`;
     let bot: { username: string | null; connected: boolean; mode: string | null } = { username: null, connected: false, mode: null };
     try {
@@ -232,6 +238,7 @@ export const getDashboard = createServerFn({ method: "GET" })
         payout: n(finance[0]?.payout),
       },
       recent: recentOrders.map(mapOrder),
+      queue: queueRows.map(mapOrder),
       notifications: notes,
       bot,
       role: actor.role,
