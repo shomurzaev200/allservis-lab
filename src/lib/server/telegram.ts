@@ -1,4 +1,4 @@
-import { setDefaultResultOrder } from "node:dns";
+import https from "node:https";
 import { getSql } from "@/lib/db";
 import { DISTRICTS, districtById, serviceById } from "@/lib/catalog";
 import { clientLabel, formatSum, STATUS_LABEL, type OrderStatus } from "@/lib/domain";
@@ -37,28 +37,48 @@ type TgUpdate = {
 
 const TG_UPDATES = ["message", "callback_query", "my_chat_member", "channel_post"];
 
-// AWS often resolves api.telegram.org to IPv6 first. Egress is IPv4-only, so
-// Node's fetch dies with "fetch failed" while curl (IPv4) works.
-setDefaultResultOrder("ipv4first");
+type TgJson = { ok: boolean; description?: string; result?: Record<string, unknown> | unknown[] };
 
-async function tg(token: string, method: string, body: Record<string, unknown>) {
-  try {
-    const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-      signal: AbortSignal.timeout(method === "getUpdates" ? 40_000 : 15_000),
+/** IPv4 only. Node fetch tries IPv6 first and dies with "fetch failed" on this VPC. */
+function tg(token: string, method: string, body: Record<string, unknown>): Promise<TgJson> {
+  const payload = JSON.stringify(body);
+  const timeoutMs = method === "getUpdates" ? 40_000 : 15_000;
+  return new Promise((resolve) => {
+    const req = https.request(
+      {
+        hostname: "api.telegram.org",
+        path: `/bot${token}/${method}`,
+        method: "POST",
+        family: 4,
+        headers: {
+          "content-type": "application/json",
+          "content-length": Buffer.byteLength(payload),
+        },
+        timeout: timeoutMs,
+      },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (chunk: Buffer) => chunks.push(chunk));
+        res.on("end", () => {
+          const raw = Buffer.concat(chunks).toString("utf8");
+          try {
+            resolve(JSON.parse(raw) as TgJson);
+          } catch {
+            resolve({ ok: false, description: `Telegram ответил не JSON (${res.statusCode ?? "?"})` });
+          }
+        });
+      },
+    );
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ ok: false, description: "Нет связи с Telegram: таймаут" });
     });
-    const json = (await res.json()) as { ok: boolean; description?: string; result?: Record<string, unknown> | unknown[] };
-    return json;
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "fetch failed";
-    const cause = err instanceof Error && err.cause instanceof Error ? err.cause.message : "";
-    return {
-      ok: false as const,
-      description: `Нет связи с Telegram: ${message}${cause ? ` (${cause})` : ""}`,
-    };
-  }
+    req.on("error", (err: NodeJS.ErrnoException) => {
+      resolve({ ok: false, description: `Нет связи с Telegram: ${err.code ?? ""} ${err.message}`.trim() });
+    });
+    req.write(payload);
+    req.end();
+  });
 }
 
 function markup(buttons?: KeyboardButton[][]) {
