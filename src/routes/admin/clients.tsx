@@ -60,7 +60,7 @@ function ClientsPage() {
               <th className="px-3 py-3">Заказы</th>
               <th className="px-3 py-3">Последний мастер</th>
               <th className="px-3 py-3">Реферал</th>
-              <th className="px-3 py-3">Оплата</th>
+              <th className="px-3 py-3">Доступ</th>
               <th className="px-3 py-3">Статус</th>
               {canDelete || canPay ? <th className="px-3 py-3" /> : null}
             </tr>
@@ -83,7 +83,7 @@ function ClientsPage() {
                 <td className="px-3 py-3">{c.orders_count}{c.completed_count ? ` · ✓${c.completed_count}` : ""}</td>
                 <td className="px-3 py-3 text-xs">{c.last_master || "—"}</td>
                 <td className="px-3 py-3 font-mono text-[11px]">{c.ref_code || "—"}{c.referred_by ? ` ← ${c.referred_by}` : ""}</td>
-                <td className="px-3 py-3">{c.paid ? <span className="text-ok">оплачен</span> : <span className="text-warn">нет</span>}</td>
+                <td className="px-3 py-3">{c.paid ? <span className="text-ok">открыт</span> : <span className="text-warn">нет</span>}</td>
                 <td className="px-3 py-3">{c.blocked ? <span className="text-danger">блок</span> : <span className="text-ok">ок</span>}</td>
                 {canDelete || canPay ? (
                   <td className="px-3 py-3">
@@ -94,10 +94,10 @@ function ClientsPage() {
                             size="sm"
                             variant="outline"
                             onClick={() => {
-                              if (window.confirm(`Отменить оплату «${c.name}»? Бот снова попросит перевод.`)) unpay.mutate(c.id);
+                              if (window.confirm(`Снять последний подтверждённый платёж «${c.name}»? Если есть другие, доступ останется.`)) unpay.mutate(c.id);
                             }}
                           >
-                            Отменить оплату
+                            Отменить платёж
                           </Button>
                         ) : (
                           <Button
@@ -106,7 +106,7 @@ function ClientsPage() {
                               if (window.confirm(`Открыть доступ «${c.name}» без скрина?`)) pay.mutate(c.id);
                             }}
                           >
-                            Пополнить
+                            Открыть доступ
                           </Button>
                         )
                       ) : null}

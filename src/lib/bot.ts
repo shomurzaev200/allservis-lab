@@ -288,19 +288,19 @@ function liveMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
 function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
   if (lang === "uz") {
     return [
-      [{ id: "cmd:order", label: "🔧 Usta chaqirish" }, { id: "cmd:myorders", label: "📦 Arizalarim" }],
-      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "cmd:balance", label: "💰 Balans" }],
-      [{ id: "cmd:prices", label: "💵 Narxlar" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
+      [{ id: "cmd:order", label: "🔧 Usta chaqirish" }, { id: "cmd:repeat", label: "🔁 Oldingi kabi" }],
+      [{ id: "cmd:myorders", label: "📦 Arizalarim" }, { id: "cmd:profile", label: "👤 Profil" }],
+      [{ id: "cmd:balance", label: "🔓 Kirish" }, { id: "cmd:prices", label: "💵 Narxlar" }],
       [{ id: "cmd:support", label: "📞 Operator" }, { id: "cmd:howto", label: "ℹ️ Qanday ishlaydi" }],
-      [{ id: "cmd:become", label: "👨‍🔧 Usta bo‘lish" }],
+      [{ id: "cmd:reviews", label: "⭐️ Izohlar" }, { id: "cmd:become", label: "👨‍🔧 Usta bo‘lish" }],
     ];
   }
   return [
-    [{ id: "cmd:order", label: "🔧 Вызвать мастера" }, { id: "cmd:myorders", label: "📦 Мои заявки" }],
-    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "cmd:balance", label: "💰 Баланс" }],
-    [{ id: "cmd:prices", label: "💵 Цены и услуги" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
+    [{ id: "cmd:order", label: "🔧 Вызвать мастера" }, { id: "cmd:repeat", label: "🔁 Как в прошлый раз" }],
+    [{ id: "cmd:myorders", label: "📦 Мои заявки" }, { id: "cmd:profile", label: "👤 Профиль" }],
+    [{ id: "cmd:balance", label: "🔓 Доступ" }, { id: "cmd:prices", label: "💵 Цены и услуги" }],
     [{ id: "cmd:support", label: "📞 Оператор" }, { id: "cmd:howto", label: "ℹ️ Как это работает" }],
-    [{ id: "cmd:become", label: "👨‍🔧 Стать мастером" }],
+    [{ id: "cmd:reviews", label: "⭐️ Отзывы" }, { id: "cmd:become", label: "👨‍🔧 Стать мастером" }],
   ];
 }
 
@@ -383,6 +383,7 @@ function summary(d: Draft): string {
           `Tel — ${d.phone ?? "—"}`,
           `Foto — ${d.photos.length ? d.photos.length + " ta" : "yo‘q"}`,
           `Izoh — ${d.comment || "yo‘q"}`,
+          d.when ? `Qachon — ${d.when}` : "Qachon — hozir",
         ]
       : [
           "Проверьте заявку:",
@@ -395,6 +396,7 @@ function summary(d: Draft): string {
           `Телефон — ${d.phone ?? "—"}`,
           `Фото — ${d.photos.length ? d.photos.length + " шт." : "нет"}`,
           `Комментарий — ${d.comment || "нет"}`,
+          d.when ? `Когда — ${d.when}` : "Когда — сейчас",
         ];
   if (svc) lines.push(lang === "uz" ? `Chaqiruv — ${formatSum(svc.from)} dan` : `Выезд — от ${formatSum(svc.from)}`);
   return lines.join("\n");
@@ -447,13 +449,14 @@ export function labelToTapId(raw: string): string | null {
   if (q === fold(RU.change) || q.includes("измен") || q.includes("zgartir")) return "confirm:no";
   if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman") || q.includes("на линии")) return "online:on";
   if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn") || q.includes("офлайн")) return "online:off";
+  if (q.includes("повтор") || q.includes("oldingi") || q.includes("как в прошл")) return "cmd:repeat";
   if (q.includes("вызвать") || q.includes("chaqirish") || q === "услуги" || q === "xizmat") return "cmd:order";
   if (q.includes("доступн") || q.startsWith("⚡") || q.includes("buyurtma") && !q.includes("usta")) return "cmd:jobs";
   if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
   if (q.includes("стать мастером") || q.includes("usta bo") || q === "мастер") return "cmd:become";
   if (q.includes("начать регистрац") || q.includes("регистрацию") || q.includes("ro'yxatdan") || q.includes("royxatdan")) return "role:master";
   if (q.includes("профиль") || q.includes("profil")) return "cmd:profile";
-  if (q.includes("баланс") || q.includes("balans")) return "cmd:balance";
+  if ((q.includes("доступ") || q.includes("kirish") || q.includes("баланс") || q.includes("balans")) && !q.includes("доступн")) return "cmd:balance";
   if (q.includes("цены") || q.includes("narxlar") || q.includes("narx va")) return "cmd:prices";
   if (q.includes("отзыв") || q.includes("izoh")) return "cmd:reviews";
   if (q.includes("как это") || q.includes("qanday ishlaydi") || q.includes("как работает")) return "cmd:howto";
@@ -471,6 +474,28 @@ export function labelToTapId(raw: string): string | null {
   if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:menu";
   if (q.includes("отмен") || q.includes("bekor") || q === "/cancel") return "cmd:cancel";
   return null;
+}
+
+function parseWhen(raw: string): string | null {
+  const text = raw.trim().toLowerCase();
+  const clock = text.match(/(\d{1,2})[:.](\d{2})/);
+  const abs = text.match(/(20\d{2})-(\d{2})-(\d{2})/);
+  const now = new Date();
+  const at = new Date(now);
+  if (abs) {
+    at.setFullYear(Number(abs[1]), Number(abs[2]) - 1, Number(abs[3]));
+  } else if (text.includes("послезавтра") || text.includes("indingi")) {
+    at.setDate(at.getDate() + 2);
+  } else if (text.includes("завтра") || text.includes("ertaga")) {
+    at.setDate(at.getDate() + 1);
+  }
+  if (clock) {
+    at.setHours(Number(clock[1]), Number(clock[2]), 0, 0);
+  } else if (!abs) {
+    return null;
+  }
+  if (at.getTime() < Date.now() - 60_000) at.setDate(at.getDate() + 1);
+  return at.toISOString();
 }
 
 export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotResult {
@@ -529,7 +554,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     const next = applyLocation(draft, event.lat, event.lng);
     const inside = isInsideServiceArea(event.lat, event.lng);
     if (!inside) {
-      if (step === "master_geo" || (draft.role === "master" && (step === "master_phone" || step === "master_geo"))) {
+      if (step === "master_geo" || (draft.role === "master" && step === "master_phone")) {
         return {
           userMessage: user("📍"),
           replies: [
@@ -549,7 +574,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         draft: { ...next, districtId: undefined, neighborhood: undefined, fullAddress: undefined },
       };
     }
-    if (step === "master_geo" || (draft.role === "master" && (step === "master_phone" || step === "master_geo"))) {
+    if (step === "master_geo" || (draft.role === "master" && step === "master_phone")) {
       return {
         userMessage: user("📍"),
         replies: [bot(t(lang, "masterDone"), { buttons: masterMenuKeys(lang) })],
@@ -1025,7 +1050,17 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
           draft,
         };
       }
-      return { userMessage: user(t(lang, "confirm")), replies: [], step: "live", draft, submit: draft };
+      return {
+        userMessage: user(t(lang, "confirm")),
+        replies: [bot(lang === "uz" ? "Qachon kerak?" : "Когда нужен мастер?", {
+          buttons: [
+            [{ id: "when:now", label: lang === "uz" ? "⚡ Hozir" : "⚡ Сейчас" }],
+            [{ id: "when:later", label: lang === "uz" ? "📅 Sana va vaqt" : "📅 На дату и время" }],
+          ],
+        })],
+        step: "when",
+        draft: { ...draft, when: undefined },
+      };
     }
     return {
       userMessage: user(raw),
@@ -1040,6 +1075,49 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         }),
       ],
       step: "confirm",
+      draft,
+    };
+  }
+
+  if (step === "when") {
+    if (tapId === "when:later") {
+      return {
+        userMessage: user(raw || (lang === "uz" ? "Sana" : "На время")),
+        replies: [bot(lang === "uz"
+          ? "Yozing: 2026-10-26 15:00 yoki «ertaga 15:00»."
+          : "Напишите: 2026-10-26 15:00 или «завтра 15:00».", {
+          buttons: [[{ id: "when:now", label: lang === "uz" ? "⚡ Hozir" : "⚡ Лучше сейчас" }]],
+        })],
+        step: "when",
+        draft: { ...draft, when: "ask" },
+      };
+    }
+    if (tapId === "when:now") {
+      const next = { ...draft, when: undefined };
+      return { userMessage: user(lang === "uz" ? "Hozir" : "Сейчас"), replies: [], step: "live", draft: next, submit: next };
+    }
+    if (draft.when === "ask" && raw && event.type === "text") {
+      const iso = parseWhen(raw);
+      if (!iso) {
+        return {
+          userMessage: user(raw),
+          replies: [bot(lang === "uz" ? "Sana tushunilmadi. Masalan: ertaga 15:00" : "Не разобрал дату. Например: завтра 15:00")],
+          step: "when",
+          draft,
+        };
+      }
+      const next = { ...draft, when: iso };
+      return { userMessage: user(raw), replies: [], step: "live", draft: next, submit: next };
+    }
+    return {
+      userMessage: user(raw),
+      replies: [bot(lang === "uz" ? "Hozir yoki sana?" : "Сейчас или на дату?", {
+        buttons: [
+          [{ id: "when:now", label: lang === "uz" ? "⚡ Hozir" : "⚡ Сейчас" }],
+          [{ id: "when:later", label: lang === "uz" ? "📅 Sana va vaqt" : "📅 На дату и время" }],
+        ],
+      })],
+      step: "when",
       draft,
     };
   }

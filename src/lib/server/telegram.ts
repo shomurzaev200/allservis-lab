@@ -6,6 +6,7 @@ import { emptyDraft, reduceBot, statusReply, clientMenu, liveMenu, masterMenu, l
 import type { ChatStep, Draft, KeyboardButton } from "@/lib/types";
 import { insertOrder } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
+import { accruePayout, parkPayout } from "./workspace";
 import { trackRefEvent } from "./refs";
 import { formatGeoCard, isInsideServiceArea, isTashkentDistrictName, OUTSIDE_SERVICE_AREA, resolveLocation, SERVICE_CITY } from "@/lib/geo";
 import { displayArea, formatBecomeMaster, formatClientHome, formatHowTo, formatOpError, HR, statusLine, svcTitle } from "@/lib/tg-ui";
@@ -299,12 +300,14 @@ async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderI
             { text: "⭐⭐", data: `rate:2:${orderId}` },
             { text: "⭐", data: `rate:1:${orderId}` },
           ],
+          [{ text: "Подтверждаю работу", data: `okjob:${orderId}` }],
+          [{ text: "Есть проблема", data: `badjob:${orderId}` }],
         ])
       : undefined;
   const menu = status === "completed" || status === "cancelled" || status === "master_rejected" ? markup(clientMenu(lang)) : undefined;
   await tg(token, "sendMessage", {
     chat_id: Number(chat),
-    text: `${title}\n\n📦 Заявка №${o.public_no}${extra}${status === "completed" ? "\n\nОцените мастера звёздами." : ""}`,
+    text: `${title}\n\n📦 Заявка №${o.public_no}${extra}${status === "completed" ? "\n\nОцените мастера и подтвердите, что работа сделана. Пока нет подтверждения — доля мастера не начисляется." : ""}`,
     reply_markup: rateKb ?? menu ?? undefined,
   });
   if (status === "completed" || status === "cancelled" || status === "master_rejected") {
@@ -344,7 +347,15 @@ async function applyJob(sql: Sql, uid: string, token: string, masterTg: string, 
   const st = String(o[0].status);
   const { addEvent, addNote } = await import("./workspace");
   if (code === "a" && st === "assigned") {
-    await sql`update as_orders set status = 'master_accepted', accepted_at = now(), updated_at = now() where id = ${orderId}`;
+    const rows = await sql<{ id: number }>`
+      update as_orders set status = 'master_accepted', accepted_at = now(), updated_at = now()
+      where user_id = ${uid} and id = ${orderId} and master_id = ${mid} and status = 'assigned'
+      returning id
+    `;
+    if (!rows[0]) {
+      await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
+      return;
+    }
     await sql`update as_masters set accepted_orders = accepted_orders + 1, online_status = 'busy', last_seen = now() where id = ${mid}`;
     await addEvent(sql, uid, orderId, "master_accepted", "master", {});
     await tg(token, "sendMessage", {
@@ -354,31 +365,103 @@ async function applyJob(sql: Sql, uid: string, token: string, masterTg: string, 
     });
     await notifyClientOfMaster(sql, uid, token, orderId, "master_accepted");
   } else if (code === "r" && st === "assigned") {
-    await sql`update as_orders set status = 'master_rejected', updated_at = now() where id = ${orderId}`;
+    const rows = await sql<{ id: number }>`
+      update as_orders set status = 'master_rejected', updated_at = now()
+      where user_id = ${uid} and id = ${orderId} and master_id = ${mid} and status = 'assigned'
+      returning id
+    `;
+    if (!rows[0]) {
+      await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
+      return;
+    }
     await sql`update as_masters set rejected_orders = rejected_orders + 1, last_seen = now() where id = ${mid}`;
     await addEvent(sql, uid, orderId, "master_rejected", "master", { masterId: mid });
     await addNote(sql, uid, "admin", `Мастер отказался от заявки №${o[0].public_no}`, "Назначьте другого", orderId, null);
     await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Отказ принят. Ждите следующую заявку.", reply_markup: markup(masterMenu("ru", true)) });
     await notifyClientOfMaster(sql, uid, token, orderId, "master_rejected");
   } else if (code === "e" && st === "master_accepted") {
-    await sql`update as_orders set status = 'enroute', updated_at = now() where id = ${orderId}`;
+    const rows = await sql<{ id: number }>`
+      update as_orders set status = 'enroute', updated_at = now()
+      where user_id = ${uid} and id = ${orderId} and master_id = ${mid} and status = 'master_accepted'
+      returning id
+    `;
+    if (!rows[0]) {
+      await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
+      return;
+    }
     await addEvent(sql, uid, orderId, "enroute", "master", {});
     await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Клиент видит, что вы выехали.", reply_markup: jobButtons(orderId, "enroute") });
     await notifyClientOfMaster(sql, uid, token, orderId, "enroute");
   } else if (code === "h" && st === "enroute") {
-    await sql`update as_orders set status = 'arrived', arrived_at = now(), updated_at = now() where id = ${orderId}`;
+    const rows = await sql<{ id: number }>`
+      update as_orders set status = 'arrived', arrived_at = now(), updated_at = now()
+      where user_id = ${uid} and id = ${orderId} and master_id = ${mid} and status = 'enroute'
+      returning id
+    `;
+    if (!rows[0]) {
+      await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
+      return;
+    }
     await addEvent(sql, uid, orderId, "arrived", "master", {});
     await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "На месте. После работы — «Завершить».", reply_markup: jobButtons(orderId, "arrived") });
     await notifyClientOfMaster(sql, uid, token, orderId, "arrived");
   } else if (code === "d" && (st === "arrived" || st === "in_progress")) {
-    await sql`update as_orders set status = 'completed', completed_at = now(), updated_at = now() where id = ${orderId}`;
-    await sql`update as_masters set completed_orders = completed_orders + 1, earnings = earnings + ${nSafe(o[0].master_payout)}, online_status = 'online', last_seen = now() where id = ${mid}`;
+    const rows = await sql<{ id: number }>`
+      update as_orders set status = 'completed', completed_at = now(), updated_at = now(), client_confirmed = false
+      where user_id = ${uid} and id = ${orderId} and master_id = ${mid}
+        and status in ('arrived', 'in_progress')
+      returning id
+    `;
+    if (!rows[0]) {
+      await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
+      return;
+    }
+    await sql`update as_masters set completed_orders = completed_orders + 1, last_seen = now() where id = ${mid} and online_status <> 'blocked'`;
+    await parkPayout(sql, uid, mid, orderId, nSafe(o[0].master_payout));
     await addEvent(sql, uid, orderId, "completed", "master", {});
-    await tg(token, "sendMessage", { chat_id: Number(masterTg), text: `Заявка №${o[0].public_no} завершена. Клиенту ушла оценка.`, reply_markup: markup(masterMenu("ru", true)) });
+    await tg(token, "sendMessage", {
+      chat_id: Number(masterTg),
+      text: `Заявка №${o[0].public_no} завершена. Начисление появится после подтверждения клиента.`,
+      reply_markup: markup(masterMenu("ru", true)),
+    });
     await notifyClientOfMaster(sql, uid, token, orderId, "completed");
   } else {
     await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
   }
+}
+
+async function confirmJob(sql: Sql, uid: string, token: string, chatId: string, orderId: number, problem: boolean) {
+  const o = await sql<{ id: number; master_id: number | null; master_payout: number; status: string; public_no: number; telegram_id: string | null }>`
+    select o.id, o.master_id, o.master_payout, o.status, o.public_no, c.telegram_id
+    from as_orders o join as_clients c on c.id = o.client_id
+    where o.user_id = ${uid} and o.id = ${orderId}
+  `;
+  if (!o[0] || String(o[0].telegram_id ?? "") !== chatId || o[0].status !== "completed") {
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Эта заявка вам не принадлежит или ещё не завершена." });
+    return;
+  }
+  if (problem) {
+    const { addNote } = await import("./workspace");
+    await addNote(sql, uid, "admin", `Проблема по заявке №${o[0].public_no}`, "Клиент не подтвердил работу. Не выплачивайте, пока не разберётесь.", orderId, o[0].master_id);
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Передали диспетчеру. Начисление мастеру пока не закрыто." });
+    return;
+  }
+  try {
+    const upd = await sql<{ id: number }>`
+      update as_orders set client_confirmed = true, updated_at = now()
+      where user_id = ${uid} and id = ${orderId} and coalesce(client_confirmed, false) = false
+      returning id
+    `;
+    if (!upd[0]) {
+      await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Вы уже подтвердили эту заявку." });
+      return;
+    }
+  } catch {
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Не смог сохранить подтверждение. Напишите оператору." });
+    return;
+  }
+  if (o[0].master_id) await accruePayout(sql, uid, Number(o[0].master_id), orderId, nSafe(o[0].master_payout));
+  await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Спасибо. Работа подтверждена, мастеру начислена доля." });
 }
 
 async function saveStars(sql: Sql, uid: string, token: string, chatId: string, data: string) {
@@ -386,10 +469,18 @@ async function saveStars(sql: Sql, uid: string, token: string, chatId: string, d
   const stars = Number(parts[1]);
   const orderId = Number(parts[2]);
   if (!stars || stars < 1 || stars > 5) return;
-  const o = await sql<{ id: number; client_id: number; master_id: number | null; public_no: number }>`
-    select id, client_id, master_id, public_no from as_orders where user_id = ${uid} and id = ${orderId}
+  const o = await sql<{ id: number; client_id: number; master_id: number | null; public_no: number; status: string; telegram_id: string | null }>`
+    select o.id, o.client_id, o.master_id, o.public_no, o.status, c.telegram_id
+    from as_orders o join as_clients c on c.id = o.client_id
+    where o.user_id = ${uid} and o.id = ${orderId}
   `;
-  if (!o[0]?.master_id) return;
+  if (!o[0]?.master_id || o[0].status !== "completed") return;
+  if (String(o[0].telegram_id ?? "") !== chatId) return;
+  const existing = await sql<{ id: number }>`select id from as_reviews where user_id = ${uid} and order_id = ${orderId} limit 1`;
+  if (existing[0]) {
+    await tg(token, "sendMessage", { chat_id: Number(chatId), text: "Оценка по этой заявке уже сохранена." });
+    return;
+  }
   await sql`
     insert into as_reviews (user_id, order_id, client_id, master_id, rating, comment)
     values (${uid}, ${orderId}, ${o[0].client_id}, ${o[0].master_id}, ${stars}, ${""})
@@ -533,20 +624,32 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
       where master_id = ${m[0].id} and status = 'completed' and completed_at >= date_trunc('month', now())
     `.catch(() => [{ n: 0 }]);
     if (tapId === "cmd:mbalance") {
+      let pending = 0;
+      let paidOut = 0;
+      try {
+        const sums = await sql<{ pending: number; paid: number }>`
+          select
+            coalesce(sum(amount) filter (where status = 'pending'), 0)::int as pending,
+            coalesce(sum(amount) filter (where status = 'paid'), 0)::int as paid
+          from as_payouts where master_id = ${m[0].id}
+        `;
+        pending = Number(sums[0]?.pending ?? 0);
+        paidOut = Number(sums[0]?.paid ?? 0);
+      } catch { /* payouts optional */ }
+      const earned = Number(m[0].earnings);
       await tg(token, "sendMessage", {
         chat_id: Number(chatId),
         text: [
-          "💰 МОЙ БАЛАНС",
+          "💰 НАЧИСЛЕНИЯ",
           "",
-          "Доступно:",
+          `Начислено (клиент подтвердил): ${formatSum(earned)}`,
+          `Ждёт подтверждения клиента: ${formatSum(pending)}`,
+          `Уже выплачено кассой: ${formatSum(paidOut)}`,
+          `Осталось получить: ${formatSum(Math.max(0, earned - paidOut))}`,
           "",
-          formatSum(Number(m[0].earnings)),
-          "",
-          HR,
-          "",
-          `📈 Заработано сегодня: ${formatSum(Number(today[0]?.n ?? 0))}`,
-          `📅 За неделю: ${formatSum(Number(week[0]?.n ?? 0))}`,
-          `📆 За месяц: ${formatSum(Number(month[0]?.n ?? 0))}`,
+          `Сегодня по завершённым: ${formatSum(Number(today[0]?.n ?? 0))}`,
+          `Неделя: ${formatSum(Number(week[0]?.n ?? 0))}`,
+          `Месяц: ${formatSum(Number(month[0]?.n ?? 0))}`,
         ].join("\n"),
         reply_markup: markup(masterMenu("ru", online)),
       });
@@ -680,11 +783,13 @@ export function startPoller(token: string, webhookId: string, secret: string) {
           continue;
         }
         for (const upd of json.result as TgUpdate[]) {
-          offset = (upd.update_id ?? 0) + 1;
           try {
             await handleTelegramWebhook(webhookId, secret, upd);
-          } catch {
-            /* keep polling */
+            await ackTelegramUpdate(webhookId, upd.update_id ?? 0);
+            offset = (upd.update_id ?? 0) + 1;
+          } catch (err) {
+            console.error("[telegram] update failed", upd.update_id, err);
+            break;
           }
         }
       } catch {
@@ -2022,17 +2127,13 @@ async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: s
   `;
   const L = lang === "uz";
   const lines = [
-    L ? "💰 MENING BALANSIM" : "💰 МОЙ БАЛАНС",
+    L ? "🔓 KIRISH" : "🔓 ДОСТУП К ЗАЯВКАМ",
     "",
-    HR,
+    paid[0]?.paid
+      ? (L ? "Kirish ochiq. Bu hamyon emas — chekdan yechilmaydi." : "Доступ открыт. Это не кошелёк: сумма не списывается с каждой заявки.")
+      : (L ? "Kirish yopiq. To‘lovni tasdiqlash kerak." : "Доступа нет. Нужна подтверждённая оплата доступа."),
     "",
-    L ? "💵 Mavjud:" : "💵 Доступно:",
-    "",
-    formatSum(sum),
-    "",
-    paid[0]?.paid ? (L ? "✅ Kirish ochiq" : "✅ Доступ открыт") : (L ? "⏳ To‘lov kutilmoqda" : "⏳ Ожидает оплату"),
-    "",
-    HR,
+    L ? `Tasdiqlangan to‘lovlar: ${formatSum(sum)}` : `Подтверждённые оплаты доступа: ${formatSum(sum)}`,
   ];
   if (hist.length) {
     lines.push("", L ? "📊 Operatsiyalar:" : "📊 История операций:", "");
@@ -2045,7 +2146,7 @@ async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: s
     lines.push("", L ? "Hali operatsiya yo‘q." : "Операций пока нет.");
   }
   const btns: KeyboardButton[][] = [
-    [{ id: "cmd:pay", label: L ? "➕ To‘ldirish" : "➕ Пополнить баланс" }],
+    [{ id: "cmd:pay", label: L ? "💳 Kirishni to‘lash" : "💳 Оплатить доступ" }],
     [{ id: "cmd:menu", label: L ? "◀️ Orqaga" : "◀️ Назад" }],
   ];
   await tg(token, "sendMessage", { chat_id: Number(chatId), text: lines.join("\n"), reply_markup: markup(btns) });
@@ -2339,6 +2440,17 @@ async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: 
         ${spec}, ${insideMaster ? "online" : "offline"}, now(), ${lat}, ${lng}
       )
     `;
+    try {
+      await sql`
+        update as_masters
+        set approved = false,
+            access_code = substr(md5(${uid} || ':' || id::text || ':' || ${chatId}), 1, 8),
+            specs = ${spec}
+        where user_id = ${uid} and telegram_id = ${chatId} and (access_code is null or access_code = '')
+      `;
+    } catch {
+      /* columns arrive with migration 0014 */
+    }
   }
   try {
     await pushWorkspaceLog(
@@ -2354,6 +2466,26 @@ async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: 
       { parseMode: "HTML" },
     );
   } catch { /* ignore */ }
+}
+
+export async function ackTelegramUpdate(hookId: string, updateId: number) {
+  if (!updateId) return;
+  try {
+    const sql = await getSql();
+    const extra = await sql<{ user_id: string }>`select user_id from as_bots where webhook_id = ${hookId} limit 1`;
+    const ws = extra[0]
+      ? extra
+      : await sql<{ user_id: string }>`select user_id from as_workspace where webhook_id = ${hookId} limit 1`;
+    const uid = ws[0]?.user_id;
+    if (!uid) return;
+    await sql`
+      insert into as_tg_inbox (user_id, bot_key, update_id, ok)
+      values (${uid}, ${hookId}, ${updateId}, true)
+      on conflict (user_id, bot_key, update_id) do update set ok = true, error = null
+    `;
+  } catch {
+    /* inbox table is optional until migration 0014 */
+  }
 }
 
 export async function handleTelegramWebhook(hookId: string, secretHeader: string | null, update: TgUpdate) {
@@ -2378,6 +2510,17 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const kind = extra[0]?.kind ?? "client";
   const token = ws.bot_token;
   const uid = ws.user_id;
+  const updateId = typeof update.update_id === "number" ? update.update_id : 0;
+  if (updateId) {
+    try {
+      const seen = await sql<{ ok: boolean }>`
+        select ok from as_tg_inbox where user_id = ${uid} and bot_key = ${hookId} and update_id = ${updateId}
+      `;
+      if (seen[0]?.ok) return { ok: true, duplicate: true };
+    } catch {
+      /* migration 0014 */
+    }
+  }
 
   if (update.channel_post?.chat) {
     const ch = update.channel_post.chat;
@@ -2517,6 +2660,12 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     await saveStars(sql, uid, token, chatId, cb.data);
     return { ok: true };
   }
+  if (cb?.data?.startsWith("okjob:") || cb?.data?.startsWith("badjob:")) {
+    await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const orderId = Number(cb.data.split(":")[1]);
+    if (orderId) await confirmJob(sql, uid, token, chatId, orderId, cb.data.startsWith("badjob:"));
+    return { ok: true };
+  }
 
   const tapGuess = cb?.data ?? (msg?.text ? labelToTapId(msg.text) : null);
   const masterExists = await sql<{ id: number }>`
@@ -2545,6 +2694,58 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   const live = Boolean(sess[0]?.live_order_id) || step === "live";
   const lang = draft.lang === "uz" ? "uz" : "ru";
 
+  if (tapGuess === "cmd:repeat") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    if (live) {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: lang === "uz" ? "Faol ariza bor. Avval uni yoping." : "Сначала закройте текущую заявку.",
+      });
+      return { ok: true };
+    }
+    const prev = await sql<{
+      category_slug: string; description: string; phone: string; district: string; address: string;
+      lat: number | null; lng: number | null; comment: string; master_id: number | null;
+    }>`
+      select o.category_slug, o.description, o.phone, o.district, o.address, o.lat, o.lng, o.comment, o.master_id
+      from as_orders o join as_clients c on c.id = o.client_id
+      where o.user_id = ${uid} and c.telegram_id = ${chatId}
+      order by o.created_at desc limit 1
+    `;
+    const p = prev[0];
+    if (!p || p.lat == null || p.lng == null) {
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: lang === "uz" ? "Oldingi ariza yo‘q. Yangi oching." : "Прошлой заявки нет. Создайте новую.",
+        reply_markup: markup(clientMenu(lang === "uz" ? "uz" : "ru")),
+      });
+      return { ok: true };
+    }
+    try {
+      const created = await insertOrder(sql, uid, {
+        name,
+        phone: p.phone,
+        category: p.category_slug,
+        description: p.description,
+        district: p.district,
+        address: p.address,
+        lat: Number(p.lat),
+        lng: Number(p.lng),
+        comment: p.comment || (p.master_id ? `прошлый мастер #${p.master_id}` : ""),
+        telegramId: chatId,
+      });
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: lang === "uz"
+          ? `Oldingi manzil bilan ariza №${created.publicNo} ochildi.`
+          : `Повторил прошлый адрес. Заявка №${created.publicNo} у диспетчера.${p.master_id ? ` В комментарии прошлый мастер #${p.master_id}.` : ""}`,
+      });
+    } catch (err) {
+      const text = err instanceof Error ? err.message : "Не вышло";
+      await tg(token, "sendMessage", { chat_id: Number(chatId), text });
+    }
+    return { ok: true };
+  }
   if (tapGuess === "cmd:myorders") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     await sendClientOrders(sql, uid, token, chatId, lang, live);
@@ -2602,7 +2803,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     const p = wsPay[0];
     const amt = Number(p?.pay_amount ?? 0);
     const text = [
-      lang === "uz" ? "➕ BALANSNI TO‘LDIRISH" : "➕ ПОПОЛНИТЬ БАЛАНС",
+      lang === "uz" ? "🔓 KIRISHNI TO‘LASH" : "🔓 ОПЛАТА ДОСТУПА",
       "",
       amt ? `💵 ${formatSum(amt)}` : "",
       p?.pay_bank ? `🏦 ${p.pay_bank}` : "",
@@ -2898,6 +3099,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
           comment: result.submit.comment,
           photos: result.submit.photos,
           telegramId: chatId,
+          scheduledFor: result.submit.when && result.submit.when !== "ask" ? result.submit.when : null,
         });
         await sql`
           insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
@@ -2908,6 +3110,9 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
           lang === "uz" ? "✅ ARIZA YARATILDI" : "✅ ЗАЯВКА СОЗДАНА",
           "",
           `📦 №${created.publicNo}`,
+          result.submit.when && result.submit.when !== "ask"
+            ? (lang === "uz" ? `📅 ${new Date(result.submit.when).toLocaleString("uz")}` : `📅 К ${new Date(result.submit.when).toLocaleString("ru")}`)
+            : "",
           "",
           lang === "uz" ? "🔧 Xizmat:" : "🔧 Услуга:",
           svcTitle(svc.id, lang === "uz" ? "uz" : "ru"),

@@ -13,6 +13,7 @@ export type ChatStep =
   | "phone"
   | "comment"
   | "confirm"
+  | "when"
   | "live"
   | "support"
   | "rate"
@@ -55,6 +56,7 @@ export type Draft = {
   lng?: number;
   phone?: string;
   comment?: string;
+  when?: string;
   name: string;
   lang?: Lang;
   role?: UserRole;

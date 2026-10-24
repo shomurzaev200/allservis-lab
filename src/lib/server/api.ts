@@ -4,7 +4,7 @@ import { getSql } from "@/lib/db";
 import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
 import { isInsideServiceArea } from "@/lib/geo";
-import { addAudit, addEvent, addNote, tickPresence, type StaffWho } from "./workspace";
+import { addAudit, addEvent, addNote, accruePayout, parkPayout, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
 import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
@@ -28,6 +28,8 @@ export type OrderRow = {
   accepted_at: string | null; arrived_at: string | null; started_at: string | null;
   completed_at: string | null; cancelled_at: string | null; updated_at: string;
   client_name: string; master_name: string | null; client_tg: string | null; client_rating: number;
+  cancel_reason: string; scheduled_for: string | null; price_estimate: number; price_agreed: number | null;
+  price_paid: number; client_confirmed: boolean; operator_note: string; assigned_by: string | null;
 };
 export type NoteRow = { id: number; kind: string; title: string; body: string; order_id: number | null; master_id: number | null; read: boolean; created_at: string };
 export type EventRow = { id: number; event_type: string; actor: string; metadata: string; created_at: string };
@@ -40,7 +42,10 @@ export type ClientListRow = {
   ref_code: string | null; referred_by: string | null; last_master: string | null; last_status: string | null;
 };
 export type ReviewListRow = { id: number; rating: number; comment: string; created_at: string; public_no: number; client_name: string | null; master_name: string | null };
-export type AuditRow = { id: number; action: string; object_type: string; object_id: string; old_value: string | null; new_value: string | null; created_at: string };
+export type AuditRow = {
+  id: number; action: string; object_type: string; object_id: string; old_value: string | null; new_value: string | null;
+  created_at: string; actor_name: string | null; actor_email: string | null;
+};
 
 function n(v: unknown): number {
   const x = typeof v === "number" ? v : Number(v);
@@ -125,6 +130,14 @@ function mapOrder(r: Record<string, unknown>): OrderRow {
     master_name: r.master_name ? String(r.master_name) : null,
     client_tg: r.client_tg ? String(r.client_tg) : null,
     client_rating: n(r.client_rating),
+    cancel_reason: String(r.cancel_reason ?? ""),
+    scheduled_for: r.scheduled_for ? String(r.scheduled_for) : null,
+    price_estimate: r.price_estimate == null ? n(r.price) : n(r.price_estimate),
+    price_agreed: r.price_agreed == null ? null : n(r.price_agreed),
+    price_paid: n(r.price_paid),
+    client_confirmed: asBool(r.client_confirmed),
+    operator_note: String(r.operator_note ?? ""),
+    assigned_by: r.assigned_by ? String(r.assigned_by) : null,
   };
 }
 
@@ -201,6 +214,19 @@ export const getDashboard = createServerFn({ method: "GET" })
       [uid],
     );
     const notes = await sql<NoteRow>`select id, kind, title, body, order_id, master_id, read, created_at from as_notifications where user_id = ${uid} order by created_at desc limit 8`;
+    const lateRows = await sql.query<Record<string, unknown>>(
+      `select ${ORDER_SELECT} from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
+       where o.user_id = $1 and o.status = 'assigned' and o.assigned_at < now() - interval '10 minutes'
+       order by o.assigned_at asc limit 12`,
+      [uid],
+    );
+    let payWait = 0;
+    if (can(actor, "finance")) {
+      try {
+        const pendingPay = await sql<{ n: number }>`select count(*)::int as n from as_payments where user_id = ${uid} and status = 'pending'`;
+        payWait = n(pendingPay[0]?.n);
+      } catch { /* ignore */ }
+    }
     let bot: { username: string | null; connected: boolean; mode: string | null } = { username: null, connected: false, mode: null };
     try {
       const row = await sql<{ bot_username: string | null; webhook_id: string | null; poll_mode: boolean }>`
@@ -230,15 +256,20 @@ export const getDashboard = createServerFn({ method: "GET" })
         cancelled: n(orders[0]?.cancelled),
         rejected: n(orders[0]?.rejected),
       },
-      finance: {
-        today: n(finance[0]?.today),
-        week: n(finance[0]?.week),
-        month: n(finance[0]?.month),
-        avg: n(finance[0]?.avg),
-        payout: n(finance[0]?.payout),
-      },
+      finance: can(actor, "finance")
+        ? {
+            today: n(finance[0]?.today),
+            week: n(finance[0]?.week),
+            month: n(finance[0]?.month),
+            avg: n(finance[0]?.avg),
+            payout: n(finance[0]?.payout),
+            hidden: false,
+          }
+        : { today: 0, week: 0, month: 0, avg: 0, payout: 0, hidden: true },
       recent: recentOrders.map(mapOrder),
       queue: queueRows.map(mapOrder),
+      late: lateRows.map(mapOrder),
+      payWait,
       notifications: notes,
       bot,
       role: actor.role,
@@ -247,24 +278,38 @@ export const getDashboard = createServerFn({ method: "GET" })
 
 export const listOrders = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
-  .validator((q: { status?: string; q?: string } | undefined) => q ?? {})
+  .validator((q: { status?: string; q?: string; page?: number; from?: string; to?: string } | undefined) => q ?? {})
   .handler(async ({ context, data }) => {
-    const { sql, uid, actor } = await ctxSql(context.userId);
+    const { sql, uid } = await ctxSql(context.userId);
     const status = data.status && data.status !== "all" ? data.status : null;
     const search = data.q?.trim() ? `%${data.q.trim()}%` : null;
-    const rows = await sql.query<Record<string, unknown>>(
-      `select ${ORDER_SELECT}
-       from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
-       where o.user_id = $1
+    const page = Math.max(1, Math.floor(Number(data.page) || 1));
+    const limit = 40;
+    const offset = (page - 1) * limit;
+    const from = /^\d{4}-\d{2}-\d{2}$/.test(data.from ?? "") ? data.from : null;
+    const to = /^\d{4}-\d{2}-\d{2}$/.test(data.to ?? "") ? data.to : null;
+    const where = `o.user_id = $1
          and ($2::text is null
            or ($2 = 'waiting' and o.status in ('waiting_admin','master_rejected'))
            or ($2 = 'work' and o.status in ('master_accepted','enroute','arrived','in_progress'))
            or o.status = $2)
-         and ($3::text is null or c.name ilike $3 or o.description ilike $3 or o.phone ilike $3 or o.public_no::text ilike $3)
-       order by o.created_at desc limit 80`,
-      [uid, status, search],
+         and ($3::text is null or c.name ilike $3 or o.description ilike $3 or o.phone ilike $3 or o.public_no::text ilike $3 or c.telegram_id ilike $3 or coalesce(m.first_name, '') ilike $3)
+         and ($4::date is null or o.created_at::date >= $4::date)
+         and ($5::date is null or o.created_at::date <= $5::date)`;
+    const rows = await sql.query<Record<string, unknown>>(
+      `select ${ORDER_SELECT}
+       from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
+       where ${where}
+       order by o.created_at desc limit $6 offset $7`,
+      [uid, status, search, from, to, limit, offset],
     );
-    return rows.map(mapOrder);
+    const totalRows = await sql.query<{ n: number }>(
+      `select count(*)::int as n
+       from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
+       where ${where}`,
+      [uid, status, search, from, to],
+    );
+    return { items: rows.map(mapOrder), total: n(totalRows[0]?.n), page };
   });
 
 export const getOrder = createServerFn({ method: "GET" })
@@ -302,7 +347,7 @@ export const getMaster = createServerFn({ method: "GET" })
   .handler(async ({ context, data: id }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     const rows = await sql`select * from as_masters where user_id = ${uid} and id = ${id}`;
-    if (!rows[0]) return { master: null, orders: [] as OrderRow[], reviews: [] as ReviewListRow[] };
+    if (!rows[0]) return { master: null, orders: [] as OrderRow[], reviews: [] as ReviewListRow[], payouts: [], accessCode: "", approved: false, specs: "", zone: "", schedule: "" };
     const orders = await sql.query<Record<string, unknown>>(
       `select ${ORDER_SELECT} from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id where o.user_id = $1 and o.master_id = $2 order by o.created_at desc limit 30`,
       [uid, id],
@@ -311,7 +356,29 @@ export const getMaster = createServerFn({ method: "GET" })
       select r.id, r.rating, r.comment, r.created_at, o.public_no, c.name as client_name, '' as master_name
       from as_reviews r left join as_orders o on o.id = r.order_id left join as_clients c on c.id = r.client_id
       where r.user_id = ${uid} and r.master_id = ${id} order by r.created_at desc`;
-    return { master: mapMaster(rows[0] as Record<string, unknown>), orders: orders.map(mapOrder), reviews };
+    const master = mapMaster(rows[0] as Record<string, unknown>);
+    if (!can(actor, "finance")) master.earnings = 0;
+    let payouts: { id: number; amount: number; status: string; note: string; created_at: string }[] = [];
+    if (can(actor, "finance")) {
+      try {
+        payouts = await sql`
+          select id, amount, status, note, created_at from as_payouts
+          where user_id = ${uid} and master_id = ${id} order by created_at desc limit 30
+        `;
+      } catch { /* optional */ }
+    }
+    const raw = rows[0] as Record<string, unknown>;
+    return {
+      master,
+      orders: orders.map(mapOrder),
+      reviews,
+      payouts,
+      accessCode: raw.access_code ? String(raw.access_code) : "",
+      approved: raw.approved == null ? true : asBool(raw.approved),
+      specs: String(raw.specs ?? raw.specialization ?? ""),
+      zone: String(raw.zone ?? ""),
+      schedule: String(raw.schedule ?? ""),
+    };
   });
 
 export const listClients = createServerFn({ method: "GET" })
@@ -386,7 +453,14 @@ export const assignMaster = createServerFn({ method: "POST" })
     const master = m[0] as Record<string, unknown> | undefined;
     if (!master) return { success: false as const, error: "MASTER_NOT_FOUND" };
     if (String(master.online_status) === "blocked") return { success: false as const, error: "MASTER_BLOCKED" };
-    await sql`update as_orders set master_id = ${data.masterId}, status = 'assigned', assigned_at = now(), updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
+    const updated = await sql<{ id: number }>`
+      update as_orders
+      set master_id = ${data.masterId}, status = 'assigned', assigned_at = now(), updated_at = now(), assigned_by = ${actor.email}
+      where user_id = ${uid} and id = ${data.orderId}
+        and status in ('waiting_admin', 'master_rejected', 'assigned')
+      returning id
+    `;
+    if (!updated[0]) return { success: false as const, error: "ORDER_CHANGED" };
     await addEvent(sql, uid, data.orderId, "assigned", "admin", { masterId: data.masterId }, who(actor));
     await addAudit(sql, uid, "assign_master", "order", String(data.orderId), null, String(data.masterId), who(actor));
     const name = `${master.first_name} ${master.last_name}`;
@@ -397,34 +471,73 @@ export const assignMaster = createServerFn({ method: "POST" })
 
 export const cancelOrder = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((orderId: number) => orderId)
-  .handler(async ({ context, data: orderId }) => {
+  .validator((d: number | { orderId: number; reason?: string }) => d)
+  .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
-    await sql`update as_orders set status = 'cancelled', cancelled_at = now(), updated_at = now() where user_id = ${uid} and id = ${orderId} and status <> 'completed'`;
-    await addEvent(sql, uid, orderId, "cancelled", "admin", {}, who(actor));
+    const orderId = typeof data === "number" ? data : data.orderId;
+    const reason = typeof data === "number" ? "" : (data.reason ?? "").trim().slice(0, 200);
+    if (!reason) return { success: false as const, error: "Укажите причину отмены" };
+    const updated = await sql<{ id: number }>`
+      update as_orders
+      set status = 'cancelled', cancelled_at = now(), updated_at = now(), cancel_reason = ${reason}
+      where user_id = ${uid} and id = ${orderId} and status not in ('completed', 'cancelled')
+      returning id
+    `;
+    if (!updated[0]) return { success: false as const, error: "Заявку уже закрыли" };
+    await addEvent(sql, uid, orderId, "cancelled", "admin", { reason }, who(actor));
     await pushOrderStatus(sql, uid, orderId, "cancelled", null);
     return { success: true };
   });
 
+async function masterByCode(
+  sql: Awaited<ReturnType<typeof getSql>>,
+  uid: string,
+  masterId: number,
+  code: string,
+) {
+  const clean = code.trim().toLowerCase();
+  if (!clean) return null;
+  const rows = await sql<{ id: number }>`
+    select id from as_masters
+    where user_id = ${uid} and id = ${masterId}
+      and lower(access_code) = ${clean}
+      and coalesce(approved, true) = true
+      and online_status <> 'blocked'
+    limit 1
+  `;
+  return rows[0] ?? null;
+}
+
 export const masterDecision = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { orderId: number; accept: boolean; masterId: number }) => d)
+  .validator((d: { orderId: number; accept: boolean; masterId: number; code: string }) => d)
   .handler(async ({ context, data }) => {
-    const { sql, uid, actor } = await ctxSql(context.userId);
-    if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
+    const { sql, uid } = await ctxSql(context.userId);
+    const self = await masterByCode(sql, uid, data.masterId, data.code);
+    if (!self) return { success: false as const, error: "Кабинет открыт только по коду этого мастера" };
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
     if (!order) return { success: false as const, error: "ORDER_NOT_FOUND" };
     if (n(order.master_id) !== data.masterId) return { success: false as const, error: "NOT_ASSIGNED" };
     if (String(order.status) !== "assigned") return { success: false as const, error: "WRONG_STATUS" };
     if (data.accept) {
-      await sql`update as_orders set status = 'master_accepted', accepted_at = now(), updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
+      const updated = await sql<{ id: number }>`
+        update as_orders set status = 'master_accepted', accepted_at = now(), updated_at = now()
+        where user_id = ${uid} and id = ${data.orderId} and master_id = ${data.masterId} and status = 'assigned'
+        returning id
+      `;
+      if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
       await sql`update as_masters set accepted_orders = accepted_orders + 1, online_status = 'busy', last_seen = now() where user_id = ${uid} and id = ${data.masterId}`;
       await addEvent(sql, uid, data.orderId, "master_accepted", "master", {});
       await pushOrderStatus(sql, uid, data.orderId, "master_accepted", null);
     } else {
-      await sql`update as_orders set status = 'master_rejected', updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
+      const updated = await sql<{ id: number }>`
+        update as_orders set status = 'master_rejected', updated_at = now()
+        where user_id = ${uid} and id = ${data.orderId} and master_id = ${data.masterId} and status = 'assigned'
+        returning id
+      `;
+      if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
       await sql`update as_masters set rejected_orders = rejected_orders + 1, last_seen = now() where user_id = ${uid} and id = ${data.masterId}`;
       await addEvent(sql, uid, data.orderId, "master_rejected", "master", { masterId: data.masterId });
       await addNote(sql, uid, "admin", `Мастер отказался от заявки №${order.public_no}`, "Назначьте другого мастера", data.orderId, null);
@@ -435,22 +548,48 @@ export const masterDecision = createServerFn({ method: "POST" })
 
 export const masterAdvance = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { orderId: number; masterId: number; to: OrderStatus }) => d)
+  .validator((d: { orderId: number; masterId: number; to: OrderStatus; code: string }) => d)
   .handler(async ({ context, data }) => {
-    const { sql, uid, actor } = await ctxSql(context.userId);
-    if (!can(actor, "assign")) return { success: false as const, error: NO_PERM };
+    const { sql, uid } = await ctxSql(context.userId);
+    const self = await masterByCode(sql, uid, data.masterId, data.code);
+    if (!self) return { success: false as const, error: "Кабинет открыт только по коду этого мастера" };
     const allowed: Record<string, OrderStatus> = { master_accepted: "enroute", enroute: "arrived", arrived: "in_progress", in_progress: "completed" };
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
     if (!order) return { success: false as const, error: "ORDER_NOT_FOUND" };
     if (n(order.master_id) !== data.masterId) return { success: false as const, error: "NOT_ASSIGNED" };
-    if (allowed[String(order.status)] !== data.to) return { success: false as const, error: "WRONG_STATUS" };
-    if (data.to === "enroute") await sql`update as_orders set status = 'enroute', updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
-    else if (data.to === "arrived") await sql`update as_orders set status = 'arrived', arrived_at = now(), updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
-    else if (data.to === "in_progress") await sql`update as_orders set status = 'in_progress', started_at = now(), updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
-    else if (data.to === "completed") {
-      await sql`update as_orders set status = 'completed', completed_at = now(), updated_at = now() where user_id = ${uid} and id = ${data.orderId}`;
-      await sql`update as_masters set completed_orders = completed_orders + 1, earnings = earnings + ${n(order.master_payout)}, online_status = 'online', last_seen = now() where user_id = ${uid} and id = ${data.masterId}`;
+    const from = String(order.status);
+    if (allowed[from] !== data.to) return { success: false as const, error: "WRONG_STATUS" };
+    if (data.to === "completed") {
+      const updated = await sql<{ id: number }>`
+        update as_orders set status = 'completed', completed_at = now(), updated_at = now(), client_confirmed = false
+        where user_id = ${uid} and id = ${data.orderId} and master_id = ${data.masterId} and status = 'in_progress'
+        returning id
+      `;
+      if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
+      await sql`update as_masters set completed_orders = completed_orders + 1, last_seen = now() where user_id = ${uid} and id = ${data.masterId}`;
+      await parkPayout(sql, uid, data.masterId, data.orderId, n(order.master_payout));
+    } else if (data.to === "enroute") {
+      const updated = await sql<{ id: number }>`
+        update as_orders set status = 'enroute', updated_at = now()
+        where user_id = ${uid} and id = ${data.orderId} and master_id = ${data.masterId} and status = ${from}
+        returning id
+      `;
+      if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
+    } else if (data.to === "arrived") {
+      const updated = await sql<{ id: number }>`
+        update as_orders set status = 'arrived', arrived_at = now(), updated_at = now()
+        where user_id = ${uid} and id = ${data.orderId} and master_id = ${data.masterId} and status = ${from}
+        returning id
+      `;
+      if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
+    } else if (data.to === "in_progress") {
+      const updated = await sql<{ id: number }>`
+        update as_orders set status = 'in_progress', started_at = now(), updated_at = now()
+        where user_id = ${uid} and id = ${data.orderId} and master_id = ${data.masterId} and status = ${from}
+        returning id
+      `;
+      if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
     }
     await addEvent(sql, uid, data.orderId, data.to, "master", {});
     await pushOrderStatus(sql, uid, data.orderId, data.to, null);
@@ -459,13 +598,60 @@ export const masterAdvance = createServerFn({ method: "POST" })
 
 export const heartbeatMaster = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((masterId: number) => masterId)
-  .handler(async ({ context, data: masterId }) => {
-    const { sql, uid, actor } = await ctxSql(context.userId);
-    const busy = await sql<{ n: number }>`select count(*)::int as n from as_orders where user_id = ${uid} and master_id = ${masterId} and status in ('assigned','master_accepted','enroute','arrived','in_progress')`;
+  .validator((d: { masterId: number; code: string }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const self = await masterByCode(sql, uid, data.masterId, data.code);
+    if (!self) return { ok: false, status: "offline" as const };
+    const busy = await sql<{ n: number }>`select count(*)::int as n from as_orders where user_id = ${uid} and master_id = ${data.masterId} and status in ('assigned','master_accepted','enroute','arrived','in_progress')`;
+    const row = await sql<{ online_status: string }>`select online_status from as_masters where user_id = ${uid} and id = ${data.masterId}`;
+    const current = row[0]?.online_status ?? "offline";
+    if (current === "blocked" || current === "offline") {
+      await sql`update as_masters set last_seen = now() where user_id = ${uid} and id = ${data.masterId} and online_status <> 'blocked'`;
+      return { ok: true, status: current };
+    }
     const status = n(busy[0]?.n) > 0 ? "busy" : "online";
-    await sql`update as_masters set last_seen = now(), online_status = ${status} where user_id = ${uid} and id = ${masterId} and online_status <> 'blocked'`;
+    await sql`update as_masters set last_seen = now(), online_status = ${status} where user_id = ${uid} and id = ${data.masterId} and online_status in ('online','busy')`;
     return { ok: true, status };
+  });
+
+export const openMasterDesk = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { code: string }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const code = data.code.trim().toLowerCase();
+    if (!code) return { ok: false as const, error: "Введите код из карточки мастера" };
+    let rows: Record<string, unknown>[] = [];
+    try {
+      rows = await sql`
+        select * from as_masters where user_id = ${uid} and lower(access_code) = ${code} limit 1
+      `;
+    } catch {
+      return { ok: false as const, error: "База ещё без кодов. На сервере нужна миграция 0014." };
+    }
+    const raw = rows[0];
+    if (!raw) return { ok: false as const, error: "Код не найден" };
+    if (raw.approved === false || raw.approved === "f" || raw.approved === "false") {
+      return { ok: false as const, error: "Админ ещё не подтвердил этот профиль" };
+    }
+    if (String(raw.online_status) === "blocked") return { ok: false as const, error: "Профиль заблокирован" };
+    const master = mapMaster(raw);
+    const orders = await sql.query<Record<string, unknown>>(
+      `select ${ORDER_SELECT} from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
+       where o.user_id = $1 and o.master_id = $2 and o.status not in ('completed','cancelled')
+       order by o.created_at desc limit 40`,
+      [uid, master.id],
+    );
+    let payouts: { id: number; amount: number; status: string; note: string; created_at: string; order_id: number | null }[] = [];
+    try {
+      payouts = await sql`
+        select id, amount, status, note, created_at, order_id from as_payouts
+        where user_id = ${uid} and master_id = ${master.id}
+        order by created_at desc limit 20
+      `;
+    } catch { /* optional */ }
+    return { ok: true as const, error: null, master, orders: orders.map(mapOrder), payouts };
   });
 
 export const createOrder = createServerFn({ method: "POST" })
@@ -484,6 +670,9 @@ export const rateOrder = createServerFn({ method: "POST" })
     const o = await sql`select * from as_orders where user_id = ${uid} and id = ${data.orderId}`;
     const order = o[0] as Record<string, unknown> | undefined;
     if (!order || String(order.status) !== "completed") return { success: false };
+    if (data.rating < 1 || data.rating > 5) return { success: false };
+    const existing = await sql<{ id: number }>`select id from as_reviews where user_id = ${uid} and order_id = ${data.orderId} limit 1`;
+    if (existing[0]) return { success: false };
     await sql`insert into as_reviews (user_id, order_id, client_id, master_id, rating, comment) values (${uid}, ${data.orderId}, ${n(order.client_id)}, ${order.master_id == null ? null : n(order.master_id)}, ${data.rating}, ${""})`;
     return { success: true };
   });
@@ -538,14 +727,161 @@ export const listReviews = createServerFn({ method: "GET" }).middleware([authMid
 });
 
 export const listAudit = createServerFn({ method: "GET" }).middleware([authMiddleware]).handler(async ({ context }) => {
-  const { sql, uid, actor } = await ctxSql(context.userId);
-  return sql<AuditRow>`select id, action, object_type, object_id, old_value, new_value, created_at from as_audit where user_id = ${uid} order by created_at desc limit 100`;
+  const { sql, uid } = await ctxSql(context.userId);
+  try {
+    return await sql<AuditRow>`
+      select id, action, object_type, object_id, old_value, new_value, created_at, actor_name, actor_email
+      from as_audit where user_id = ${uid} order by created_at desc limit 100
+    `;
+  } catch {
+    const rows = await sql<{ id: number; action: string; object_type: string; object_id: string; old_value: string | null; new_value: string | null; created_at: string }>`
+      select id, action, object_type, object_id, old_value, new_value, created_at
+      from as_audit where user_id = ${uid} order by created_at desc limit 100
+    `;
+    return rows.map((r) => ({ ...r, actor_name: null, actor_email: null }));
+  }
 });
 
 export const listNotifications = createServerFn({ method: "GET" }).middleware([authMiddleware]).handler(async ({ context }) => {
-  const { sql, uid, actor } = await ctxSql(context.userId);
-  return sql<NoteRow>`select id, kind, title, body, order_id, master_id, read, created_at from as_notifications where user_id = ${uid} order by created_at desc limit 40`;
+  const { sql, uid } = await ctxSql(context.userId);
+  return sql<NoteRow>`select id, kind, title, body, order_id, master_id, read, created_at from as_notifications where user_id = ${uid} order by created_at desc limit 80`;
 });
+
+export const markNotificationsRead = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { ids?: number[] }) => d ?? {})
+  .handler(async ({ context, data }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const ids = (data.ids ?? []).map((id) => Number(id)).filter((id) => Number.isFinite(id));
+    if (ids.length === 0) {
+      await sql`update as_notifications set read = true where user_id = ${uid} and read = false`;
+    } else {
+      for (const id of ids) {
+        await sql`update as_notifications set read = true where user_id = ${uid} and id = ${id}`;
+      }
+    }
+    return { ok: true };
+  });
+
+export const globalSearch = createServerFn({ method: "GET" })
+  .middleware([authMiddleware])
+  .validator((q: string) => q)
+  .handler(async ({ context, data }) => {
+    const { sql, uid } = await ctxSql(context.userId);
+    const q = data.trim();
+    if (q.length < 2) return { orders: [] as OrderRow[], clients: [] as { id: number; name: string; phone: string }[], masters: [] as { id: number; name: string; phone: string }[] };
+    const like = `%${q}%`;
+    const orders = await sql.query<Record<string, unknown>>(
+      `select ${ORDER_SELECT}
+       from as_orders o join as_clients c on c.id = o.client_id left join as_masters m on m.id = o.master_id
+       where o.user_id = $1 and (
+         c.name ilike $2 or c.phone ilike $2 or c.telegram_id ilike $2 or o.public_no::text ilike $2
+         or o.phone ilike $2 or coalesce(m.first_name,'') ilike $2 or coalesce(m.last_name,'') ilike $2
+       )
+       order by o.created_at desc limit 8`,
+      [uid, like],
+    );
+    const clients = await sql<{ id: number; name: string; phone: string }>`
+      select id, name, phone from as_clients
+      where user_id = ${uid} and (name ilike ${like} or phone ilike ${like} or coalesce(telegram_id,'') ilike ${like})
+      order by created_at desc limit 6
+    `;
+    const masters = await sql<{ id: number; name: string; phone: string }>`
+      select id, trim(first_name || ' ' || last_name) as name, phone from as_masters
+      where user_id = ${uid} and (first_name ilike ${like} or last_name ilike ${like} or phone ilike ${like} or coalesce(telegram_id,'') ilike ${like})
+      order by id desc limit 6
+    `;
+    return { orders: orders.map(mapOrder), clients, masters };
+  });
+
+export const saveOrderOps = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { orderId: number; operatorNote?: string; priceAgreed?: number | null; pricePaid?: number; scheduledFor?: string | null }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { ok: false as const, error: NO_PERM };
+    const note = (data.operatorNote ?? "").slice(0, 500);
+    const agreed = data.priceAgreed == null || data.priceAgreed === 0 ? null : Math.max(0, Math.round(data.priceAgreed));
+    const paid = Math.max(0, Math.round(Number(data.pricePaid ?? 0) || 0));
+    const when = data.scheduledFor && !Number.isNaN(Date.parse(data.scheduledFor)) ? new Date(data.scheduledFor).toISOString() : null;
+    try {
+      await sql`
+        update as_orders set
+          operator_note = ${note},
+          price_agreed = ${agreed},
+          price_paid = ${paid},
+          scheduled_for = ${when},
+          updated_at = now()
+        where user_id = ${uid} and id = ${data.orderId}
+      `;
+    } catch {
+      return { ok: false as const, error: "Колонки заявки появятся после миграции 0014" };
+    }
+    await addAudit(sql, uid, "order_ops", "order", String(data.orderId), null, note || String(agreed ?? ""), who(actor));
+    return { ok: true as const, error: null };
+  });
+
+export const confirmClientOrder = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((orderId: number) => orderId)
+  .handler(async ({ context, data: orderId }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { ok: false as const, error: NO_PERM };
+    const o = await sql<{ id: number; master_id: number | null; master_payout: number; status: string }>`
+      select id, master_id, master_payout, status from as_orders where user_id = ${uid} and id = ${orderId}
+    `;
+    if (!o[0] || o[0].status !== "completed") return { ok: false as const, error: "Подтверждать можно только завершённую заявку" };
+    const upd = await sql<{ id: number }>`
+      update as_orders set client_confirmed = true, updated_at = now()
+      where user_id = ${uid} and id = ${orderId} and coalesce(client_confirmed, false) = false
+      returning id
+    `;
+    if (!upd[0]) return { ok: false as const, error: "Уже подтверждено" };
+    if (o[0].master_id) await accruePayout(sql, uid, n(o[0].master_id), orderId, n(o[0].master_payout));
+    await addAudit(sql, uid, "client_confirm", "order", String(orderId), null, "confirmed", who(actor));
+    return { ok: true as const, error: null };
+  });
+
+export const markPayoutPaid = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((id: number) => id)
+  .handler(async ({ context, data: id }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "finance")) return { ok: false as const, error: NO_PERM };
+    const upd = await sql<{ id: number }>`
+      update as_payouts set status = 'paid'
+      where user_id = ${uid} and id = ${id} and status = 'accrued'
+      returning id
+    `;
+    if (!upd[0]) return { ok: false as const, error: "Начисление не найдено или клиент ещё не подтвердил" };
+    await addAudit(sql, uid, "payout_paid", "payout", String(id), "accrued", "paid", who(actor));
+    return { ok: true as const, error: null };
+  });
+
+export const setMasterProfile = createServerFn({ method: "POST" })
+  .middleware([authMiddleware])
+  .validator((d: { id: number; approved?: boolean; specs?: string; zone?: string; schedule?: string }) => d)
+  .handler(async ({ context, data }) => {
+    const { sql, uid, actor } = await ctxSql(context.userId);
+    if (!can(actor, "assign")) return { ok: false as const, error: NO_PERM };
+    try {
+      await sql`
+        update as_masters set
+          approved = ${data.approved !== false},
+          specs = ${ (data.specs ?? "").slice(0, 200) },
+          zone = ${ (data.zone ?? "").slice(0, 120) },
+          schedule = ${ (data.schedule ?? "").slice(0, 200) }
+        where user_id = ${uid} and id = ${data.id}
+      `;
+    } catch {
+      return { ok: false as const, error: "Профиль мастера обновится после миграции 0014" };
+    }
+    if (!(await sql<{ access_code: string | null }>`select access_code from as_masters where user_id = ${uid} and id = ${data.id}`)[0]?.access_code) {
+      await sql`update as_masters set access_code = substr(md5(user_id || ':' || id::text), 1, 8) where user_id = ${uid} and id = ${data.id}`;
+    }
+    await addAudit(sql, uid, "master_profile", "master", String(data.id), null, data.approved === false ? "unapproved" : "approved", who(actor));
+    return { ok: true as const, error: null };
+  });
 
 export const pollOrder = createServerFn({ method: "GET" })
   .middleware([authMiddleware])
@@ -976,6 +1312,31 @@ export const listPayments = createServerFn({ method: "GET" })
     `;
   });
 
+async function refreshClientPaid(
+  sql: Awaited<ReturnType<typeof getSql>>,
+  uid: string,
+  clientId: number | null,
+  telegramId: string | null,
+) {
+  const left = await sql<{ n: number }>`
+    select count(*)::int as n from as_payments
+    where user_id = ${uid} and status = 'approved'
+      and (
+        (${clientId ?? 0} > 0 and client_id = ${clientId ?? 0})
+        or (${telegramId ?? ""} <> '' and telegram_id = ${telegramId ?? ""})
+      )
+  `;
+  const paid = n(left[0]?.n) > 0;
+  if (clientId) {
+    if (paid) await sql`update as_clients set paid = true, paid_at = coalesce(paid_at, now()) where user_id = ${uid} and id = ${clientId}`;
+    else await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and id = ${clientId}`;
+  } else if (telegramId) {
+    if (paid) await sql`update as_clients set paid = true, paid_at = coalesce(paid_at, now()) where user_id = ${uid} and telegram_id = ${telegramId}`;
+    else await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and telegram_id = ${telegramId}`;
+  }
+  return paid;
+}
+
 export const reviewPayment = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((d: { id: number; approve: boolean }) => d)
@@ -988,7 +1349,12 @@ export const reviewPayment = createServerFn({ method: "POST" })
     `;
     if (!row[0]) return { ok: false as const, error: "Платёж не найден" };
     const status = data.approve ? "approved" : "rejected";
-    await sql`update as_payments set status = ${status}, reviewed_at = now() where id = ${data.id} and user_id = ${uid}`;
+    const changed = await sql<{ id: number }>`
+      update as_payments set status = ${status}, reviewed_at = now()
+      where id = ${data.id} and user_id = ${uid} and status = 'pending'
+      returning id
+    `;
+    if (!changed[0]) return { ok: false as const, error: "Платёж уже разобран" };
     if (data.approve) {
       if (row[0].client_id) {
         await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and id = ${row[0].client_id}`;
@@ -996,11 +1362,7 @@ export const reviewPayment = createServerFn({ method: "POST" })
         await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and telegram_id = ${row[0].telegram_id}`;
       }
     } else {
-      if (row[0].client_id) {
-        await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and id = ${row[0].client_id}`;
-      } else if (row[0].telegram_id) {
-        await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and telegram_id = ${row[0].telegram_id}`;
-      }
+      await refreshClientPaid(sql, uid, row[0].client_id, row[0].telegram_id);
     }
     await addAudit(sql, uid, data.approve ? "approve_pay" : "reject_pay", "payment", String(data.id), null, row[0].client_name, who(actor));
     const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid}`;
@@ -1082,29 +1444,49 @@ export const revokePayment = createServerFn({ method: "POST" })
       clientId = row[0].client_id;
       telegramId = row[0].telegram_id;
       name = row[0].client_name;
-    }
-    if (clientId) {
-      const c = await sql<{ name: string; telegram_id: string | null }>`
-        select name, telegram_id from as_clients where user_id = ${uid} and id = ${clientId}
+      const still = await refreshClientPaid(sql, uid, clientId, telegramId);
+      await addAudit(sql, uid, "revoke_pay", "payment", String(data.id), name, "cancelled", who(actor));
+      await notifyClientPay(
+        sql,
+        uid,
+        telegramId,
+        still
+          ? "Один платёж отменён. Доступ к заявкам сохранён — есть другая подтверждённая оплата."
+          : "Доступ закрыт. Чтобы снова вызывать мастера — оплатите доступ.",
+      );
+      return { ok: true as const, error: null, access: still };
+    } else if (clientId) {
+      const row = await sql<{ id: number; telegram_id: string | null; client_name: string }>`
+        select id, telegram_id, client_name from as_payments
+        where user_id = ${uid} and client_id = ${clientId} and status = 'approved'
+        order by id desc limit 1
       `;
-      await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and id = ${clientId}`;
-      await sql`update as_payments set status = ${"cancelled"} where user_id = ${uid} and client_id = ${clientId} and status = ${"approved"}`;
-      name = c[0]?.name || name;
-      telegramId = c[0]?.telegram_id ?? telegramId;
-    } else if (telegramId) {
-      await sql`update as_clients set paid = false, paid_at = null where user_id = ${uid} and telegram_id = ${telegramId}`;
+      if (!row[0]) return { ok: false as const, error: "Нет подтверждённой оплаты" };
+      await sql`update as_payments set status = ${"cancelled"}, reviewed_at = now() where user_id = ${uid} and id = ${row[0].id}`;
+      telegramId = row[0].telegram_id;
+      name = row[0].client_name;
+      const still = await refreshClientPaid(sql, uid, clientId, telegramId);
+      await addAudit(sql, uid, "revoke_pay", "client", String(clientId), name, "cancelled", who(actor));
+      await notifyClientPay(
+        sql,
+        uid,
+        telegramId,
+        still
+          ? "Последний платёж отменён. Доступ сохранён — есть другая подтверждённая оплата."
+          : "Доступ закрыт. Чтобы снова вызывать мастера — оплатите доступ.",
+      );
+      return { ok: true as const, error: null, access: still };
     }
-    await addAudit(sql, uid, "revoke_pay", "client", String(clientId ?? data.id ?? ""), name, "cancelled", who(actor));
-    await notifyClientPay(sql, uid, telegramId, "Пополнение отменено администратором. Чтобы снова вызывать мастера — оплатите доступ.");
-    return { ok: true as const, error: null };
+    return { ok: false as const, error: "Не указан платёж" };
   });
 
 export const setMasterOnline = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
-  .validator((d: { masterId: number; online: boolean }) => d)
+  .validator((d: { masterId: number; online: boolean; code: string }) => d)
   .handler(async ({ context, data }) => {
-    const { sql, uid, actor } = await ctxSql(context.userId);
-    if (!can(actor, "assign")) return { ok: false as const, error: NO_PERM, status: "offline" as const };
+    const { sql, uid } = await ctxSql(context.userId);
+    const self = await masterByCode(sql, uid, data.masterId, data.code);
+    if (!self) return { ok: false as const, error: "Кабинет открыт только по коду этого мастера", status: "offline" as const };
     const status = data.online ? "online" : "offline";
     await sql`update as_masters set online_status = ${status}, last_seen = now() where user_id = ${uid} and id = ${data.masterId} and online_status <> 'blocked'`;
     return { ok: true as const, status };

@@ -31,7 +31,7 @@ function PeoplePage() {
     <div className="space-y-4 p-4 md:p-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl">Кто нажал /start</h1>
+          <h1 className="font-display text-2xl">Посетители бота</h1>
           <p className="text-sm text-muted">
             Все диалоги с ботом: клиент или мастер, что уже заполнили и где остановились.
             Сейчас {data.length}: клиентов {clients}, мастеров {masters}, не закончили {open}.

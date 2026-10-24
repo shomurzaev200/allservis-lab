@@ -13,6 +13,13 @@ function tel(phone: string) {
   return digits.length >= 7 ? `tel:${digits}` : "";
 }
 
+function age(iso: string) {
+  const mins = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 60000));
+  if (mins < 60) return `${mins} мин`;
+  const h = Math.floor(mins / 60);
+  return `${h} ч ${mins % 60} мин`;
+}
+
 function Dashboard() {
   const { data, isPending, isError, refetch, dataUpdatedAt } = useQuery({
     queryKey: ["dashboard"],
@@ -73,9 +80,9 @@ function Dashboard() {
             {data.queue.map((o) => {
               const href = tel(o.phone);
               return (
-                <div key={o.id} className="flex flex-wrap items-center justify-between gap-3 rounded-lg bg-surface-2 px-3 py-3">
+                <div key={o.id} className={`flex flex-wrap items-center justify-between gap-3 rounded-lg px-3 py-3 ${age(o.created_at).includes("ч") ? "bg-warn/15" : "bg-surface-2"}`}>
                   <div className="min-w-0">
-                    <p className="font-mono text-xs text-subtle">№{o.public_no} · {new Date(o.created_at).toLocaleString("ru")}</p>
+                    <p className="font-mono text-xs text-subtle">№{o.public_no} · ждёт {age(o.created_at)}</p>
                     <p className="truncate text-sm">{o.client_name} · {serviceById(o.category_slug)?.title ?? o.category_slug}</p>
                     <p className="text-xs text-muted">{o.district || "район не указан"}{o.phone ? ` · ${o.phone}` : ""}</p>
                   </div>
@@ -91,11 +98,33 @@ function Dashboard() {
         )}
       </section>
 
+      {data.late?.length ? (
+        <section className="glass-card rounded-xl p-4">
+          <SectionTitle>Мастер не ответил больше 10 минут</SectionTitle>
+          <div className="space-y-2">
+            {data.late.map((o) => (
+              <Link key={o.id} to="/admin/orders/$id" params={{ id: String(o.id) }} className="flex items-center justify-between rounded-lg bg-warn/10 px-3 py-2 text-sm">
+                <span>№{o.public_no} · {o.master_name ?? "мастер"} · {o.client_name}</span>
+                <span className="text-xs text-warn">{o.assigned_at ? age(o.assigned_at) : ""}</span>
+              </Link>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
+      {data.payWait ? (
+        <a href="/admin/payments" className="block rounded-xl border border-warn/40 bg-warn/10 px-4 py-3 text-sm">
+          Платежей на проверке: {data.payWait}
+        </a>
+      ) : null}
+
       <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
         <Kpi label="Ждут вас" value={waiting} hint={`назначены ${data.orders.assigned} · в работе ${data.orders.work}`} tone={waiting ? "warn" : "ok"} />
         <Kpi label="Мастера" value={data.masters.online} hint={`заняты ${data.masters.busy} · офлайн ${data.masters.offline} · всего ${data.masters.total}`} tone="ok" />
         <Kpi label="Заявки сегодня" value={data.orders.today} hint={`неделя ${data.orders.week} · клиенты ${data.clients.active}`} tone="accent" />
-        <Kpi label="Выручка сегодня" value={formatSum(Number(data.finance.today))} hint={`средний чек ${formatSum(Number(data.finance.avg))}`} />
+        {data.finance.hidden ? null : (
+          <Kpi label="Выручка сегодня" value={formatSum(Number(data.finance.today))} hint={`средний чек ${formatSum(Number(data.finance.avg))}`} />
+        )}
       </div>
 
       <div className="grid gap-4 lg:grid-cols-[1.4fr_1fr]">
@@ -120,7 +149,7 @@ function Dashboard() {
               <p className="py-8 text-center text-sm text-subtle">Пока тихо</p>
             ) : (
               data.notifications.map((n) => (
-                <article key={n.id} className="rounded-lg bg-surface-2 px-3 py-2">
+                <article key={n.id} className={`rounded-lg px-3 py-2 ${n.read ? "bg-surface-2" : "bg-accent/10"}`}>
                   <p className="text-sm">{n.title}</p>
                   <p className="mt-0.5 text-xs text-muted">{n.body}</p>
                 </article>

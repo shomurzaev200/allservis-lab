@@ -26,6 +26,9 @@ function OrdersPage() {
   const [q, setQ] = useState(search.q ?? "");
   const [debounced, setDebounced] = useState(q);
   const [assign, setAssign] = useState<{ id: number; no: number; name: string } | null>(null);
+  const [page, setPage] = useState(1);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
   const qc = useQueryClient();
   const access = useAccess();
   const canAssign = access.allowed("assign");
@@ -33,13 +36,19 @@ function OrdersPage() {
     const t = window.setTimeout(() => setDebounced(q), 300);
     return () => window.clearTimeout(t);
   }, [q]);
-  const { data = [], isPending } = useQuery({
-    queryKey: ["orders", status, debounced],
-    queryFn: () => listOrders({ data: { status, q: debounced } }),
+  useEffect(() => {
+    setPage(1);
+  }, [status, debounced, from, to]);
+  const { data, isPending } = useQuery({
+    queryKey: ["orders", status, debounced, page, from, to],
+    queryFn: () => listOrders({ data: { status, q: debounced, page, from, to } }),
     refetchInterval: 15_000,
   });
+  const rows = data?.items ?? [];
+  const total = data?.total ?? 0;
+  const pages = Math.max(1, Math.ceil(total / 40));
   const cancel = useMutation({
-    mutationFn: (id: number) => cancelOrder({ data: id }),
+    mutationFn: (p: { orderId: number; reason: string }) => cancelOrder({ data: p }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["orders"] }),
   });
 
@@ -77,7 +86,36 @@ function OrdersPage() {
           ))}
         </select>
       </div>
-      <div className="overflow-x-auto rounded-xl border border-border">
+      <div className="flex flex-wrap gap-2">
+        <Input type="date" value={from} onChange={(e) => setFrom(e.target.value)} className="w-40" />
+        <Input type="date" value={to} onChange={(e) => setTo(e.target.value)} className="w-40" />
+        <p className="self-center text-xs text-muted">{total} заявок</p>
+      </div>
+      <div className="space-y-2 md:hidden">
+        {isPending ? <p className="text-sm text-muted">Загрузка…</p> : null}
+        {!isPending && rows.length === 0 ? <p className="text-sm text-muted">Нет заявок по фильтру</p> : null}
+        {rows.map((o) => (
+          <article key={o.id} className="rounded-xl border border-border bg-surface p-3">
+            <div className="flex items-start justify-between gap-2">
+              <div>
+                <p className="font-mono text-xs text-subtle">№{o.public_no}</p>
+                <p className="text-sm">{o.client_name}</p>
+                <p className="text-xs text-muted">{serviceById(o.category_slug)?.title} · {o.district}</p>
+              </div>
+              <OrderBadge status={o.status} />
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button size="sm" variant="outline" asChild>
+                <Link to="/admin/orders/$id" params={{ id: String(o.id) }}>Карточка</Link>
+              </Button>
+              {canAssign && (o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned") ? (
+                <Button size="sm" onClick={() => setAssign({ id: o.id, no: o.public_no, name: o.client_name })}>Назначить</Button>
+              ) : null}
+            </div>
+          </article>
+        ))}
+      </div>
+      <div className="hidden overflow-x-auto rounded-xl border border-border md:block">
         <table className="w-full min-w-[56rem] text-left text-sm">
           <thead className="bg-surface-2 text-xs uppercase tracking-wider text-muted">
             <tr>
@@ -101,14 +139,14 @@ function OrdersPage() {
                 </td>
               </tr>
             ) : null}
-            {!isPending && data.length === 0 ? (
+            {!isPending && rows.length === 0 ? (
               <tr>
                 <td className="px-3 py-8 text-muted" colSpan={10}>
                   Нет заявок по фильтру
                 </td>
               </tr>
             ) : null}
-            {data.map((o) => (
+            {rows.map((o) => (
               <tr key={o.id} className="border-t border-border">
                 <td className="px-3 py-3 font-mono text-xs">№{o.public_no}</td>
                 <td className="px-3 py-3">{o.client_name}</td>
@@ -140,7 +178,9 @@ function OrdersPage() {
                         size="sm"
                         variant="outline"
                         onClick={() => {
-                          if (window.confirm(`Отменить заявку №${o.public_no}? Клиент увидит отмену.`)) cancel.mutate(o.id);
+                          const reason = window.prompt(`Причина отмены заявки №${o.public_no}`);
+                          if (!reason?.trim()) return;
+                          cancel.mutate({ orderId: o.id, reason: reason.trim() });
                         }}
                       >
                         Отмена
@@ -152,6 +192,11 @@ function OrdersPage() {
             ))}
           </tbody>
         </table>
+      </div>
+      <div className="flex items-center gap-3 text-sm">
+        <Button size="sm" variant="outline" disabled={page <= 1} onClick={() => setPage((p) => Math.max(1, p - 1))}>Назад</Button>
+        <span className="text-muted">{page} / {pages}</span>
+        <Button size="sm" variant="outline" disabled={page >= pages} onClick={() => setPage((p) => p + 1)}>Дальше</Button>
       </div>
       {assign && canAssign ? (
         <AssignDialog

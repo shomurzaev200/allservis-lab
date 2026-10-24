@@ -1,11 +1,12 @@
 import { useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { cancelOrder, getOrder } from "@/lib/server/api";
+import { cancelOrder, confirmClientOrder, getOrder, saveOrderOps } from "@/lib/server/api";
 import { AssignDialog } from "@/components/admin/assign-dialog";
 import { OnlineDot, OrderBadge } from "@/components/admin/status-badge";
 import { useAccess } from "@/components/admin/access";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { serviceById } from "@/lib/catalog";
 import { formatSum } from "@/lib/domain";
 
@@ -39,13 +40,41 @@ function OrderPage() {
     refetchInterval: 15_000,
   });
   const [assign, setAssign] = useState(false);
+  const [note, setNote] = useState("");
+  const [agreed, setAgreed] = useState("");
+  const [paid, setPaid] = useState("");
+  const [photo, setPhoto] = useState<string | null>(null);
   const cancel = useMutation({
-    mutationFn: () => cancelOrder({ data: orderId }),
+    mutationFn: (reason: string) => cancelOrder({ data: { orderId, reason } }),
+    onSuccess: () => qc.invalidateQueries(),
+  });
+  const ops = useMutation({
+    mutationFn: () => saveOrderOps({
+      data: {
+        orderId,
+        operatorNote: note,
+        priceAgreed: agreed.trim() ? Number(agreed) : null,
+        pricePaid: paid.trim() ? Number(paid) : 0,
+        scheduledFor: null,
+      },
+    }),
+    onSuccess: () => qc.invalidateQueries(),
+  });
+  const confirm = useMutation({
+    mutationFn: () => confirmClientOrder({ data: orderId }),
     onSuccess: () => qc.invalidateQueries(),
   });
 
-  if (isPending || !data?.order) {
+  if (isPending) {
     return <p className="p-6 text-sm text-muted">Загрузка заявки…</p>;
+  }
+  if (!data?.order) {
+    return (
+      <div className="p-6">
+        <p className="text-sm">Заявка не найдена.</p>
+        <Link to="/admin/orders" className="mt-3 inline-block text-sm text-accent">К списку</Link>
+      </div>
+    );
   }
   const o = data.order;
   const statusAssign = o.status === "waiting_admin" || o.status === "master_rejected" || o.status === "assigned";
@@ -100,11 +129,22 @@ function OrderPage() {
             <br />
             📍 {o.lat?.toFixed(5)}, {o.lng?.toFixed(5)}
           </p>
-          <p className="mt-2 font-mono text-xs">{formatSum(o.price)}</p>
+          <p className="mt-2 font-mono text-xs">
+            оценка {formatSum(o.price_estimate || o.price)}
+            {o.price_agreed ? ` · согласовано ${formatSum(o.price_agreed)}` : ""}
+            {o.price_paid ? ` · оплачено ${formatSum(o.price_paid)}` : ""}
+            {` · мастеру ${formatSum(o.master_payout)}`}
+          </p>
+          {o.scheduled_for ? <p className="mt-1 text-sm">К времени: {new Date(o.scheduled_for).toLocaleString("ru-RU")}</p> : null}
+          {o.lat != null && o.lng != null ? (
+            <a className="mt-2 inline-block text-sm text-accent" href={`https://maps.google.com/?q=${o.lat},${o.lng}`} target="_blank" rel="noreferrer">Маршрут</a>
+          ) : null}
           {photos.length ? (
             <div className="mt-3 flex gap-2">
               {photos.map((src) => (
-                <img key={src.slice(0, 24)} src={src} alt="" className="size-16 rounded-md object-cover" />
+                <button key={src.slice(0, 32)} type="button" onClick={() => setPhoto(src)}>
+                  <img src={src} alt="" className="size-16 rounded-md object-cover" />
+                </button>
               ))}
             </div>
           ) : null}
@@ -134,14 +174,35 @@ function OrderPage() {
             </Button>
           ) : null}
           {canAssign && o.status !== "completed" && o.status !== "cancelled" ? (
-            <Button variant="outline" onClick={() => cancel.mutate()}>
+            <Button variant="outline" onClick={() => {
+              const reason = window.prompt("Причина отмены");
+              if (!reason?.trim()) return;
+              cancel.mutate(reason.trim());
+            }}>
               Отменить заявку
             </Button>
           ) : null}
+          {canAssign && o.status === "completed" && !o.client_confirmed ? (
+            <Button variant="outline" onClick={() => confirm.mutate()}>Клиент подтвердил работу</Button>
+          ) : null}
         </div>
+        {o.cancel_reason ? <p className="mt-3 text-sm text-muted">Причина отмены: {o.cancel_reason}</p> : null}
+        {o.client_confirmed ? <p className="mt-2 text-sm text-ok">Клиент подтвердил. Доля мастера начислена.</p> : null}
+        {o.assigned_by ? <p className="mt-2 text-xs text-subtle">Назначил: {o.assigned_by}</p> : null}
+        {canAssign ? (
+          <div className="mt-4 space-y-2">
+            <Input value={note} onChange={(e) => setNote(e.target.value)} placeholder={o.operator_note || "Заметка оператора"} />
+            <div className="flex flex-wrap gap-2">
+              <Input value={agreed} onChange={(e) => setAgreed(e.target.value)} placeholder="Согласованная сумма" className="max-w-[12rem]" />
+              <Input value={paid} onChange={(e) => setPaid(e.target.value)} placeholder="Факт оплаты" className="max-w-[12rem]" />
+              <Button variant="outline" onClick={() => ops.mutate()}>Сохранить</Button>
+            </div>
+            {o.operator_note ? <p className="text-sm text-muted">Заметка: {o.operator_note}</p> : null}
+          </div>
+        ) : null}
       </section>
       <section className="glass-card rounded-xl p-4">
-        <h2 className="text-sm font-medium text-muted">Timeline</h2>
+        <h2 className="text-sm font-medium text-muted">История заявки</h2>
         <ol className="mt-4 space-y-3">
           {data.events.map((e) => (
             <li key={e.id} className="flex gap-3 text-sm">
@@ -156,6 +217,11 @@ function OrderPage() {
           ))}
         </ol>
       </section>
+      {photo ? (
+        <button type="button" className="fixed inset-0 z-40 bg-black/80 p-6" onClick={() => setPhoto(null)}>
+          <img src={photo} alt="" className="mx-auto max-h-full max-w-full object-contain" />
+        </button>
+      ) : null}
       {assign && canAssign ? (
         <AssignDialog orderId={o.id} publicNo={o.public_no} clientName={o.client_name} onClose={() => setAssign(false)} />
       ) : null}

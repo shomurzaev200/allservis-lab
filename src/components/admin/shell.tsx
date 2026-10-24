@@ -1,34 +1,47 @@
-import { useState, type ReactNode } from "react";
-import { Link, useRouterState } from "@tanstack/react-router";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link, useNavigate, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { Bell, ClipboardList, CreditCard, LayoutDashboard, Map, Menu, ScrollText, Settings, Share2, Star, Target, Users, Wallet, Wrench, X } from "lucide-react";
 import { UserButton } from "@/lib/auth/gates";
 import { cn } from "@/lib/utils";
-import { getDashboard } from "@/lib/server/api";
+import { getDashboard, globalSearch } from "@/lib/server/api";
+import { Input } from "@/components/ui/input";
 import { useAccess, type PermKey } from "./access";
 
 const NAV: { to: string; label: string; icon: typeof LayoutDashboard; perm?: PermKey; group: string }[] = [
-  { group: "Работа", to: "/admin", label: "Сейчас", icon: LayoutDashboard },
+  { group: "Работа", to: "/admin", label: "Диспетчерская", icon: LayoutDashboard },
   { group: "Работа", to: "/admin/orders", label: "Заявки", icon: ClipboardList },
-  { group: "Работа", to: "/admin/masters", label: "Мастера", icon: Wrench },
   { group: "Работа", to: "/admin/map", label: "Карта", icon: Map },
-  { group: "Люди", to: "/admin/people", label: "Кто нажал /start", icon: Users },
   { group: "Люди", to: "/admin/clients", label: "Клиенты", icon: Users },
+  { group: "Люди", to: "/admin/masters", label: "Мастера", icon: Wrench },
+  { group: "Люди", to: "/admin/people", label: "Посетители бота", icon: Users },
   { group: "Люди", to: "/admin/reviews", label: "Отзывы", icon: Star },
   { group: "Рост", to: "/admin/analytics", label: "Аналитика", icon: LayoutDashboard },
   { group: "Рост", to: "/admin/targetolog", label: "Таргетолог", icon: Target },
   { group: "Рост", to: "/admin/refs", label: "Рефералы", icon: Share2 },
   { group: "Деньги", to: "/admin/finance", label: "Финансы", icon: Wallet, perm: "finance" },
-  { group: "Деньги", to: "/admin/payments", label: "Пополнения", icon: CreditCard, perm: "finance" },
-  { group: "Сервис", to: "/admin/notifications", label: "Уведомления", icon: Bell },
-  { group: "Сервис", to: "/admin/team", label: "Команда", icon: Users, perm: "invite" },
-  { group: "Сервис", to: "/admin/settings", label: "Настройки · боты", icon: Settings, perm: "bots" },
-  { group: "Сервис", to: "/admin/audit", label: "Журнал", icon: ScrollText },
+  { group: "Деньги", to: "/admin/payments", label: "Оплаты доступа", icon: CreditCard, perm: "finance" },
+  { group: "Управление", to: "/admin/notifications", label: "Уведомления", icon: Bell },
+  { group: "Управление", to: "/admin/team", label: "Команда", icon: Users, perm: "invite" },
+  { group: "Управление", to: "/admin/audit", label: "Журнал действий", icon: ScrollText },
+  { group: "Управление", to: "/admin/settings", label: "Настройки · боты", icon: Settings, perm: "bots" },
 ];
 
 export function AdminShell({ children }: { children: ReactNode }) {
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
+  const [debounced, setDebounced] = useState("");
+  const navigate = useNavigate();
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebounced(q.trim()), 250);
+    return () => window.clearTimeout(t);
+  }, [q]);
+  const found = useQuery({
+    queryKey: ["search", debounced],
+    queryFn: () => globalSearch({ data: debounced }),
+    enabled: debounced.length >= 2,
+  });
   const access = useAccess();
   const dash = useQuery({ queryKey: ["dashboard"], queryFn: () => getDashboard(), refetchInterval: 20_000 });
   const waiting = dash.data?.orders.waiting ?? 0;
@@ -82,6 +95,41 @@ export function AdminShell({ children }: { children: ReactNode }) {
             {waiting > 0 ? `${waiting} заявок ждут назначения` : "Новых заявок нет"}
             {dash.data?.bot.connected ? ` · @${dash.data.bot.username}` : " · бот не подключён"}
           </p>
+          <div className="relative min-w-0 flex-1">
+            <Input
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              placeholder="Поиск: телефон, Telegram, № заявки"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && q.trim()) {
+                  void navigate({ to: "/admin/orders", search: { status: "all", q: q.trim() } });
+                  setQ("");
+                }
+              }}
+            />
+            {debounced.length >= 2 && found.data ? (
+              <div className="absolute left-0 right-0 top-11 z-30 max-h-80 overflow-auto rounded-lg border border-border bg-surface p-2 text-sm shadow-lg">
+                {found.data.orders.map((o) => (
+                  <Link key={o.id} to="/admin/orders/$id" params={{ id: String(o.id) }} onClick={() => setQ("")} className="block rounded px-2 py-1 hover:bg-surface-2">
+                    Заявка №{o.public_no} · {o.client_name}
+                  </Link>
+                ))}
+                {found.data.clients.map((c) => (
+                  <Link key={`c${c.id}`} to="/admin/clients" onClick={() => setQ("")} className="block rounded px-2 py-1 hover:bg-surface-2">
+                    Клиент {c.name} · {c.phone}
+                  </Link>
+                ))}
+                {found.data.masters.map((m) => (
+                  <Link key={`m${m.id}`} to="/admin/masters/$id" params={{ id: String(m.id) }} onClick={() => setQ("")} className="block rounded px-2 py-1 hover:bg-surface-2">
+                    Мастер {m.name}
+                  </Link>
+                ))}
+                {found.data.orders.length + found.data.clients.length + found.data.masters.length === 0 ? (
+                  <p className="px-2 py-1 text-muted">Ничего не найдено</p>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
           <div className="ml-auto flex items-center gap-3"><UserButton /></div>
         </header>
         <main className="min-w-0 flex-1">{children}</main>

@@ -17,6 +17,7 @@ export type CreateOrderInput = {
   city?: string;
   address?: string;
   neighborhood?: string;
+  scheduledFor?: string | null;
 };
 
 function n(v: unknown): number {
@@ -61,21 +62,33 @@ export async function insertOrder(sql: Sql, uid: string, data: CreateOrderInput)
   if (blocked[0]?.blocked) {
     throw new Error("CLIENT_BLOCKED");
   }
-  const no = await sql<{ n: number }>`select coalesce(max(public_no), 12000) + 1 as n from as_orders where user_id = ${uid}`;
-  const publicNo = n(no[0]?.n);
   const photos = JSON.stringify((data.photos ?? []).slice(0, 3));
   const price = svc.from;
-  const rows = await sql<{ id: number }>`
-    insert into as_orders (
-      user_id, public_no, client_id, category_slug, description, phone, city, district, address,
-      lat, lng, status, photos, comment, price, master_payout
-    ) values (
-      ${uid}, ${publicNo}, ${clientId}, ${svc.id}, ${data.description}, ${data.phone}, ${city},
-      ${safeDistrict}, ${address}, ${lat}, ${lng}, ${"waiting_admin"}, ${photos},
-      ${data.comment ?? ""}, ${price}, ${Math.round(price * 0.7)}
-    ) returning id
-  `;
-  const id = rows[0]!.id;
+  const whenRaw = data.scheduledFor ? Date.parse(data.scheduledFor) : NaN;
+  const scheduledFor = Number.isFinite(whenRaw) ? new Date(whenRaw).toISOString() : null;
+  let id = 0;
+  let publicNo = 0;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const no = await sql<{ n: number }>`select coalesce(max(public_no), 12000) + 1 as n from as_orders where user_id = ${uid}`;
+    publicNo = n(no[0]?.n);
+    try {
+      const rows = await sql<{ id: number }>`
+        insert into as_orders (
+          user_id, public_no, client_id, category_slug, description, phone, city, district, address,
+          lat, lng, status, photos, comment, price, master_payout, price_estimate, scheduled_for
+        ) values (
+          ${uid}, ${publicNo}, ${clientId}, ${svc.id}, ${data.description}, ${data.phone}, ${city},
+          ${safeDistrict}, ${address}, ${lat}, ${lng}, ${"waiting_admin"}, ${photos},
+          ${data.comment ?? ""}, ${price}, ${Math.round(price * 0.7)}, ${price}, ${scheduledFor}
+        ) returning id
+      `;
+      id = rows[0]!.id;
+      break;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/unique|duplicate/i.test(msg) || attempt === 4) throw err;
+    }
+  }
   await addEvent(sql, uid, id, "created", "client", { source: "telegram" });
   await addNote(sql, uid, "admin", `Новая заявка №${publicNo}`, data.description, id, null);
   await addAudit(sql, uid, "create_order", "order", String(id), null, "waiting_admin");

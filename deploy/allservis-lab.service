@@ -1,0 +1,18 @@
+[Unit]
+Description=ALL SERVIS lab preview
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/allservis-lab
+EnvironmentFile=-/home/ubuntu/allservis-lab/.env
+Environment=NODE_ENV=production
+Environment=NODE_OPTIONS=--dns-result-order=ipv4first
+ExecStartPre=/usr/bin/node scripts/migrate.mjs
+ExecStart=/usr/bin/node scripts/with-app-env.mjs ./node_modules/.bin/vite preview --host 0.0.0.0 --port 8090
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
