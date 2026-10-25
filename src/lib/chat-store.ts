@@ -51,14 +51,14 @@ function enqueue(get: () => State, set: (p: Partial<State>) => void, replies: Ch
 }
 
 async function submitDraft(get: () => State, set: (p: Partial<State>) => void, draft: Draft) {
-  const svc = draft.serviceId ? serviceById(draft.serviceId) : undefined;
+  const svc = serviceById(draft.serviceId || "other");
   if (!svc || !draft.problem || !draft.phone || draft.lat == null || draft.lng == null) return;
   try {
     const res = await createOrder({
       data: {
         name: draft.name || "Клиент Telegram",
         phone: draft.phone,
-        category: svc.id,
+        category: "other",
         description: draft.problem,
         district: draft.neighborhood || draft.city || "",
         lat: draft.lat,
@@ -79,7 +79,7 @@ async function submitDraft(get: () => State, set: (p: Partial<State>) => void, d
       {
         id: `ord-${res.id}`,
         from: "bot",
-        text: `Заявка №${res.publicNo}\nСтатус: ожидает назначения мастера\nВыезд от ${svc.from.toLocaleString("ru-RU")} сум`,
+        text: `Заявка №${res.publicNo}\nСтатус: ожидает назначения мастера\nЦену согласуйте с мастером на месте`,
         time: new Date().toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" }),
         kind: "order",
         orderId: res.id,

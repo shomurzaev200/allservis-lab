@@ -284,9 +284,10 @@ export async function reverseGeocode(lat: number, lng: number): Promise<{
     const city = pickAddr(a, ["city", "town", "municipality", "village", "hamlet", "county"]);
     const district = pickAddr(a, ["city_district", "suburb", "district", "county", "state_district"]);
     const neighborhood = pickAddr(a, ["suburb", "neighbourhood", "quarter", "residential", "hamlet"]);
-    const street = pickAddr(a, ["road", "pedestrian", "street"]);
+    const streetRaw = pickAddr(a, ["road", "pedestrian", "footway", "residential", "street"]);
     const house = pickAddr(a, ["house_number"]);
     const full = (data.display_name ?? "").trim();
+    const street = streetRaw || streetFromText(full);
     const countryCode = String(a.country_code ?? "").toLowerCase();
     return { city, district, neighborhood, street, house, fullAddress: full, countryCode };
   } catch {
@@ -381,3 +382,31 @@ export function formatGeoCard(geo: GeoFix, lang: "ru" | "uz" = "ru"): string {
 }
 
 export const OUTSIDE_SERVICE_AREA = "OUTSIDE_SERVICE_AREA";
+
+const STREET_RE = /улиц|проспект|пр-т|переул|тупик|шоссе|проезд|бульвар|массив|ko['’ʻ]?chasi|kuchasi|\bst\.?\b|street|avenue|йўл|yo['’ʻ]?l/i;
+
+/** Улица из строки Nominatim, если поле road пустое. «Лолазар» — махалля, не адрес. */
+export function streetFromText(raw: string | null | undefined): string {
+  const parts = String(raw ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  for (const p of parts) {
+    if (!STREET_RE.test(p)) continue;
+    if (/област|район|туман|вилоят|махал|mahalla|mfy/i.test(p)) continue;
+    return p;
+  }
+  return "";
+}
+
+/** Улица и дом впереди, махалля следом. Так в профиле не остаётся одно «Лолазар». */
+export function placeLine(geo: { street?: string; house?: string; neighborhood?: string; district?: string; fullAddress?: string }): string {
+  const street = (geo.street || streetFromText(geo.fullAddress || "") || "").trim();
+  const house = (geo.house || "").trim();
+  const streetLine = [street, house].filter(Boolean).join(", ");
+  const mahalla = (geo.neighborhood || "").trim();
+  const area = (geo.district || "").trim();
+  const bits = [
+    streetLine,
+    mahalla && mahalla !== street ? mahalla : "",
+    !streetLine && area && area !== mahalla ? area : "",
+  ].filter(Boolean);
+  return bits.join(", ");
+}

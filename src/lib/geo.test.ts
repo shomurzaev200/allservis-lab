@@ -1,4 +1,4 @@
-import { assignmentCity, canonicalCity, cityFromCoords, isInsideServiceArea, isBekabadName, isTashkentDistrictName, sameDispatchCity } from "./geo.ts";
+import { assignmentCity, canonicalCity, cityFromCoords, isInsideServiceArea, isBekabadName, isTashkentDistrictName, placeLine, sameDispatchCity, streetFromText } from "./geo.ts";
 
 function assert(cond: unknown, msg: string) {
   if (!cond) throw new Error(msg);
@@ -31,4 +31,7 @@ assert(assignmentCity("Ташкент", 40.2206, 69.2697) === "Бекабад", 
 assert(sameDispatchCity("Бекабад", 40.22, 69.27, "Ташкент", 41.31, 69.28) === false, "Bekabad order must not reach Tashkent");
 assert(sameDispatchCity("Самарканд", 39.65, 66.96, "Ташкент", 41.31, 69.28) === false, "Samarkand order must not reach Tashkent");
 assert(sameDispatchCity("Ташкент", 41.31, 69.24, "Бекабад", 41.28, 69.22) === true, "same city even if the label is stale");
+assert(streetFromText("Лолазар, Мирабадский район, Ташкент") === "", "mahalla is not a street");
+assert(streetFromText("улица Айбека, Лолазар, Ташкент") === "улица Айбека", "street comes before mahalla");
+assert(placeLine({ street: "улица Айбека", house: "12", neighborhood: "Лолазар" }) === "улица Айбека, 12, Лолазар", "street then mahalla");
 console.log("geo tests ok");

@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { addManualPayment, getBotSettings, listClients, listPayments, reviewPayment, revokePayment } from "@/lib/server/api";
+import { addManualPayment, listClients, listPayments, reviewPayment, revokePayment } from "@/lib/server/api";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatSum } from "@/lib/domain";
@@ -21,7 +21,6 @@ function PaymentsInner() {
   const qc = useQueryClient();
   const { data = [], isPending } = useQuery({ queryKey: ["payments"], queryFn: () => listPayments() });
   const clients = useQuery({ queryKey: ["clients"], queryFn: () => listClients() });
-  const settings = useQuery({ queryKey: ["bot-settings"], queryFn: () => getBotSettings() });
   const [q, setQ] = useState("");
   const [picked, setPicked] = useState<number | "">("");
   const [amount, setAmount] = useState("");
@@ -47,14 +46,13 @@ function PaymentsInner() {
     .filter((c) => `${c.name} ${c.phone} ${c.telegram_id ?? ""}`.toLowerCase().includes(q.toLowerCase()))
     .sort((a, b) => Number(a.paid) - Number(b.paid))
     .slice(0, 40);
-  const defaultAmount = settings.data?.payAmount ?? 0;
 
   return (
     <div className="space-y-6 p-4 md:p-6">
       <div>
         <h1 className="font-display text-2xl">Пополнения</h1>
         <p className="text-sm text-muted">
-          Можно подтвердить скрин из бота, вручную открыть доступ клиенту или отменить пополнение — бот снова попросит оплату.
+          Зачисление на счёт клиента. Одна и та же сумма в течение полутора минут второй раз не пишется.
         </p>
       </div>
 
@@ -75,15 +73,26 @@ function PaymentsInner() {
         </select>
         <Input
           inputMode="numeric"
-          placeholder={defaultAmount ? `Сумма, сум (пусто = ${defaultAmount})` : "Сумма, сум"}
+          placeholder="Сумма, сум"
           value={amount}
           onChange={(e) => setAmount(e.target.value)}
         />
-        <Button disabled={!picked || add.isPending} onClick={() => add.mutate()}>
+        <Button
+          disabled={!picked || !Number(amount) || add.isPending}
+          onClick={() => {
+            if (add.isPending || !picked || !Number(amount)) return;
+            add.mutate();
+          }}
+        >
           {add.isPending ? "Добавляю…" : "Пополнить счёт"}
         </Button>
         {add.data && !add.data.ok ? <p className="text-sm text-danger">{add.data.error}</p> : null}
-        {add.data?.ok ? <p className="text-sm text-ok">Доступ открыт. Клиенту ушло сообщение в бот.</p> : null}
+        {add.data?.ok && add.data.duplicate ? (
+          <p className="text-sm text-warn">Такая сумма уже зачислена только что. Повтор не создан. На счёте {formatSum(add.data.balance)}.</p>
+        ) : null}
+        {add.data?.ok && !add.data.duplicate ? (
+          <p className="text-sm text-ok">Зачислено. На счёте {formatSum(add.data.balance)}. Клиенту ушло сообщение в бот.</p>
+        ) : null}
       </section>
 
       {review.data && !review.data.ok ? <p className="text-sm text-danger">{review.data.error}</p> : null}
@@ -124,7 +133,7 @@ function PaymentsInner() {
                 size="sm"
                 variant="outline"
                 onClick={() => {
-                  if (window.confirm(`Отменить пополнение «${p.client_name}»? Клиент снова не сможет вызывать мастера.`)) {
+                  if (window.confirm(`Отменить пополнение «${p.client_name}» на ${formatSum(p.amount)}?`)) {
                     revoke.mutate({ id: p.id });
                   }
                 }}

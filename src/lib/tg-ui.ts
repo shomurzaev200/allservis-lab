@@ -1,4 +1,4 @@
-import { SERVICES, serviceById } from "./catalog";
+import { serviceById } from "./catalog";
 import { formatSum } from "./domain";
 
 export const HR = "━━━━━━━━━━━━━━━━";
@@ -77,7 +77,7 @@ export function formatClientHome(opts: {
       `Xush kelibsiz, ${n}! 👋`,
       "",
       `📍 ${city}`,
-      "💳 Ustaga joyida to‘laysiz",
+      `💰 Hisob: ${formatSum(opts.balance ?? 0)}`,
       "",
       "Qanday yordam bera olamiz?",
       "Pastdagi tugmani tanlang.",
@@ -90,7 +90,7 @@ export function formatClientHome(opts: {
     `Добро пожаловать, ${n}! 👋`,
     "",
     `📍 ${city}`,
-    "💳 Мастеру платите на месте",
+    `💰 На счёте: ${formatSum(opts.balance ?? 0)}`,
     "",
     "Чем можем помочь?",
     "👇 Выберите действие",
@@ -98,19 +98,26 @@ export function formatClientHome(opts: {
 }
 
 export function formatPrices(lang: "ru" | "uz"): string {
-  const lines = lang === "uz"
-    ? ["💵 NARXLAR VA XIZMATLAR", "", HR, ""]
-    : ["💵 ЦЕНЫ И УСЛУГИ", "", HR, ""];
-  for (const s of SERVICES) {
-    lines.push(`${svcTitle(s.id, lang)}`, `от ${formatSum(s.from)}`, "");
-  }
-  lines.push(HR, "");
-  lines.push(
-    lang === "uz"
-      ? "ℹ️ Aniq narx ish murakkabligiga bog‘liq.\nUsta ishni boshlashdan oldin aytadi."
-      : "ℹ️ Точная стоимость зависит\nот сложности работы.\n\nПеред началом мастер сообщает\nстоимость.",
-  );
-  return lines.join("\n");
+  return lang === "uz"
+    ? [
+        "💵 NARX",
+        "",
+        HR,
+        "",
+        "Katalog yo‘q. Narxni usta bilan joyida kelishasiz.",
+        "Do‘st taklif qilsangiz, chegirma shu narxdan.",
+        "1 yakunlangan do‘st = 1%.",
+      ].join("\n")
+    : [
+        "💵 ЦЕНА",
+        "",
+        HR,
+        "",
+        "Каталога услуг нет.",
+        "Цену согласуете с мастером на месте.",
+        "Скидка за друзей, которые уже завершили заказ:",
+        "1 друг = 1%, 10 друзей = 10%.",
+      ].join("\n");
 }
 
 export function formatHowTo(lang: "ru" | "uz"): string {
@@ -118,27 +125,27 @@ export function formatHowTo(lang: "ru" | "uz"): string {
     return [
       "ℹ️ ALL SERVIS QANDAY ISHLAYDI?",
       "",
-      "1️⃣ Ariza yaratasiz",
-      "2️⃣ 📍 Joylashuv yuborasiz",
-      "3️⃣ 👨‍🔧 Bo‘sh usta shu shahardan o‘zi tayinlanadi",
-      "4️⃣ 👨‍🔧 Usta arizani oladi",
-      "5️⃣ ✅ Usta tasdiqlaydi",
-      "6️⃣ 🚗 Usta keladi",
-      "7️⃣ 🔧 Ishni bajaradi",
-      "8️⃣ ⭐️ Siz baholaysiz",
+      "1️⃣ «Ariza» ni bosing",
+      "2️⃣ Izoh: nima bo‘ldi",
+      "3️⃣ Foto (o‘tkazish mumkin)",
+      "4️⃣ 📍 Geolokatsiya",
+      "5️⃣ 📱 Telefon",
+      "6️⃣ Hozir yoki sana",
+      "7️⃣ 👨‍🔧 Shu shahardagi bo‘sh usta",
+      "8️⃣ Joyida to‘lov. Chegirma — yakunlangan do‘stlar uchun",
     ].join("\n");
   }
   return [
     "ℹ️ КАК РАБОТАЕТ ALL SERVIS?",
     "",
-    "1️⃣ Вы создаёте заявку",
-    "2️⃣ 📍 Отправляете местоположение",
-    "3️⃣ 👨‍🔧 Свободный мастер из вашего города назначается сам",
-    "4️⃣ 👨‍🔧 Мастер получает заявку",
-    "5️⃣ ✅ Мастер подтверждает заказ",
-    "6️⃣ 🚗 Мастер приезжает",
-    "7️⃣ 🔧 Выполняет работу",
-    "8️⃣ ⭐️ Вы оцениваете мастера",
+    "1️⃣ Нажмите «Заявка»",
+    "2️⃣ Комментарий: что случилось",
+    "3️⃣ Фото, можно пропустить",
+    "4️⃣ 📍 Геолокация",
+    "5️⃣ 📱 Телефон",
+    "6️⃣ Сейчас или на дату",
+    "7️⃣ 👨‍🔧 Свободный мастер из вашего города",
+    "8️⃣ Оплата мастеру на месте. Скидка — за друзей с завершённым заказом",
   ].join("\n");
 }
 
@@ -157,6 +164,7 @@ export function formatBecomeMaster(lang: "ru" | "uz"): string {
       "✅ ALL SERVIS orqali daromad",
       "",
       "📍 Butun O‘zbekiston. Buyurtma faqat siz turgan shahardan keladi.",
+      "Telefon va geolokatsiya. Mutaxassislik so‘ralmaydi.",
     ].join("\n");
   }
   return [
@@ -172,6 +180,7 @@ export function formatBecomeMaster(lang: "ru" | "uz"): string {
     "✅ зарабатывать через ALL SERVIS",
     "",
     "📍 Работаем по всему Узбекистану. Заявки приходят только из вашего города.",
+    "Нужны телефон и геолокация. Специальность не спрашиваем.",
   ].join("\n");
 }
 

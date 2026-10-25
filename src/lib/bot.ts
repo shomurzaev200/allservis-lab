@@ -1,10 +1,10 @@
-import { DISTRICTS, matchService, serviceById, type ServiceId } from "./catalog";
+import { DISTRICTS, type ServiceId } from "./catalog";
 import type { ChatMessage, ChatStep, Draft, KeyboardButton, Lang, UserRole } from "./types";
-import { formatPhone, formatSum, isValidUzPhone, nowTime, uid } from "./utils";
+import { formatPhone, isValidUzPhone, nowTime, uid } from "./utils";
 import { clientLabel } from "./domain";
 import type { OrderStatus } from "./domain";
 import { cityFromCoords, isInsideServiceArea } from "./geo";
-import { formatBecomeMaster, formatHowTo, formatOpError, formatPrices, svcTitle } from "./tg-ui";
+import { formatBecomeMaster, formatHowTo, formatPrices } from "./tg-ui";
 
 export const BOT_NAME = "All Servis";
 export const BOT_HANDLE = "@AllServisBot";
@@ -18,12 +18,12 @@ const RU: Dict = {
   client: "Я клиент",
   master: "Я мастер",
   welcome:
-    "📍 Работаем по всему Узбекистану.\nСвободный мастер из вашего города назначается сам, по очереди.\nВыберите услугу или напишите, что случилось.",
-  help: "🛠 Вызвать мастера — заявка\n📋 Мои заявки — статус\n👤 Профиль — данные и ссылка\n💬 Поддержка — диспетчер",
+    "📍 Работаем по всему Узбекистану.\nСвободный мастер из вашего города назначается сам, по очереди.\n«Заявка»: комментарий, фото, точка на карте и телефон.",
+  help: "📝 Заявка — комментарий, фото, гео, телефон\n📦 Мои заявки — статус\n💰 Счёт — баланс\n🎁 Пригласить — своя ссылка и скидка\n👤 Профиль — данные\n💬 Оператор — чат с диспетчером",
   cancelDraft: "Черновик сброшен.",
   needService: "Нажмите кнопку или напишите, например: «течёт кран».",
-  describe: "Коротко опишите проблему.",
-  moreDetail: "Нужно чуть конкретнее — что случилось и где.",
+  describe: "Напишите комментарий: что случилось и что нужно сделать.",
+  moreDetail: "Комментарий слишком короткий. Напишите чуть подробнее.",
   sendPhoto: "Пришлите фото поломки или пропустите — без фото тоже примем.",
   skipPhoto: "Пропустить фото",
   morePhoto: "Фото получил. Ещё одно или отправьте геолокацию.",
@@ -45,16 +45,16 @@ const RU: Dict = {
   confirm: "Подтвердить",
   change: "Изменить",
   confirmHint: "Нажмите «Подтвердить» или «Изменить».",
-  restart: "Начнём заново. Выберите услугу.",
+  restart: "Начнём заново. Напишите, что случилось.",
   missing: "Данных не хватает. /start",
   live: "Заявка в работе. Статус придёт сюда.",
-  startHint: "Чтобы вызвать мастера — нажмите «Вызвать мастера».",
+  startHint: "Чтобы оставить заявку — нажмите «Заявка».",
   thanksRate: "Спасибо. Оценка ушла администратору.",
   askReview: "Можете написать отзыв текстом или нажать меню.",
   reviewSaved: "Отзыв сохранён. Спасибо!",
   newOrder: "Новая заявка",
   menu: "Меню",
-  masterSpec: "Какая специальность?",
+  masterSpec: "Отправьте номер телефона.",
   masterPhone: "Отправьте номер — по нему с вами свяжется диспетчер.",
   masterGeo: "Отправьте геолокацию. Заявки будут только из вашего города.",
   masterDone: "Профиль мастера сохранён. Онлайн/офлайн — кнопками. Админ видит вас в панели.",
@@ -70,12 +70,12 @@ const UZ: Dict = {
   client: "Men mijozman",
   master: "Men ustaman",
   welcome:
-    "📍 Butun O‘zbekiston.\nBo‘sh usta shu shahardan o‘zi, navbat bilan tayinlanadi.\nXizmatni tanlang yoki nima bo‘lganini yozing.",
-  help: "🛠 Usta chaqirish — ariza\n📋 Arizalarim — status\n👤 Profil — ma’lumot va havola\n💬 Yordam — dispatcher",
+    "📍 Butun O‘zbekiston.\nBo‘sh usta shu shahardan o‘zi, navbat bilan tayinlanadi.\n«Ariza»: izoh, foto, nuqta va telefon.",
+  help: "📝 Ariza — izoh, foto, geo, telefon\n📦 Arizalarim — status\n💰 Hisob — balans\n🎁 Taklif — shaxsiy havola va chegirma\n👤 Profil\n💬 Operator",
   cancelDraft: "Qoralama tozalandi.",
   needService: "Tugmani bosing yoki yozing, masalan: «kran oqayapti».",
-  describe: "Muammoni qisqa yozing.",
-  moreDetail: "Aniqroq yozing — nima bo‘ldi va qayerda.",
+  describe: "Izoh yozing: nima bo‘ldi va nima qilish kerak.",
+  moreDetail: "Izoh juda qisqa. Biroz batafsilroq yozing.",
   sendPhoto: "Buzilish fotosini yuboring yoki o‘tkazing.",
   skipPhoto: "Fotosiz davom etish",
   morePhoto: "Foto oldim. Yana yuboring yoki geolokatsiya.",
@@ -97,10 +97,10 @@ const UZ: Dict = {
   confirm: "Tasdiqlash",
   change: "O‘zgartirish",
   confirmHint: "«Tasdiqlash» yoki «O‘zgartirish».",
-  restart: "Qaytadan. Xizmatni tanlang.",
+  restart: "Qaytadan. Nima bo‘lganini yozing.",
   missing: "Ma’lumot yetarli emas. /start",
   live: "Ariza jarayonda. Status shu yerga keladi.",
-  startHint: "Usta chaqirish uchun «Usta chaqirish» ni bosing.",
+  startHint: "Ariza uchun «Ariza» ni bosing.",
   thanksRate: "Rahmat. Baholash adminga ketdi.",
   askReview: "Matnli izoh yozishingiz yoki menyuni bosishingiz mumkin.",
   reviewSaved: "Izoh saqlandi. Rahmat!",
@@ -120,17 +120,6 @@ function t(lang: Lang | undefined, key: keyof typeof RU): string {
   return (lang === "uz" ? UZ : RU)[key] ?? RU[key];
 }
 
-const SVC_UZ: Record<string, string> = {
-  plumb: "Santexnik",
-  elec: "Elektrik",
-  ac: "Konditsioner",
-  appliance: "Texnika",
-  furniture: "Mebel",
-  lock: "Qulflar",
-  paint: "Bo‘yoqchi",
-  other: "Boshqa",
-};
-
 const DIST_UZ: Record<string, string> = {
   bekabad: "Bekobod",
 };
@@ -139,28 +128,6 @@ function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
   return out;
-}
-
-function categoryKeys(lang: Lang | undefined): KeyboardButton[][] {
-  const L = lang === "uz" ? "uz" : "ru";
-  return [
-    [
-      { id: "svc:plumb", label: svcTitle("plumb", L) },
-      { id: "svc:elec", label: svcTitle("elec", L) },
-    ],
-    [
-      { id: "svc:ac", label: svcTitle("ac", L) },
-      { id: "svc:appliance", label: svcTitle("appliance", L) },
-    ],
-    [
-      { id: "svc:furniture", label: svcTitle("furniture", L) },
-      { id: "svc:lock", label: svcTitle("lock", L) },
-    ],
-    [
-      { id: "svc:paint", label: svcTitle("paint", L) },
-      { id: "svc:other", label: svcTitle("other", L) },
-    ],
-  ];
 }
 
 function districtKeys(lang: Lang | undefined): KeyboardButton[][] {
@@ -200,20 +167,16 @@ function districtTitle(id: string) {
 }
 
 function afterKeepGeo(draft: Draft, lang: Lang | undefined, userMessage: ChatMessage): BotResult {
-  if (draft.phone) {
+  const next = { ...draft, serviceId: "other" as ServiceId };
+  if (!next.phone) {
     return {
       userMessage,
-      replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
-      step: "comment",
-      draft,
+      replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
+      step: "phone",
+      draft: next,
     };
   }
-  return {
-    userMessage,
-    replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
-    step: "phone",
-    draft,
-  };
+  return confirmStep(next, lang, userMessage);
 }
 
 function afterPhotos(draft: Draft, lang: Lang | undefined, userMessage: ChatMessage): BotResult {
@@ -252,22 +215,21 @@ function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[]
       [{ id: "cmd:jobs", label: "📦 Buyurtmalar" }, { id: "cmd:mbalance", label: "💰 Balans" }],
       [{ id: "cmd:stats", label: "📊 Statistika" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
       [{ id: online ? "online:off" : "online:on", label: online ? "🔴 Oflayn" : "🟢 Onlayn" }, { id: "cmd:loc", label: "📍 Lokatsiya" }],
-      [{ id: "cmd:profile", label: "👤 Profil" }, { id: "role:client", label: "👤 Mijoz" }],
+      [{ id: "cmd:ref", label: "🎁 Taklif" }, { id: "cmd:profile", label: "👤 Profil" }],
+      [{ id: "role:client", label: "👤 Mijoz" }],
     ];
   }
   return [
     [{ id: "cmd:jobs", label: "📦 Мои заявки" }, { id: "cmd:mbalance", label: "💰 Баланс" }],
     [{ id: "cmd:stats", label: "📊 Статистика" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
     [{ id: online ? "online:off" : "online:on", label: online ? "🔴 Офлайн" : "🟢 На линии" }, { id: "cmd:loc", label: "📍 Локация" }],
-    [{ id: "cmd:profile", label: "👤 Профиль" }, { id: "role:client", label: "👤 Клиент" }],
+    [{ id: "cmd:ref", label: "🎁 Пригласить" }, { id: "cmd:profile", label: "👤 Профиль" }],
+    [{ id: "role:client", label: "👤 Клиент" }],
   ];
 }
 
 function categoryPickKeys(lang: Lang | undefined): KeyboardButton[][] {
-  return [
-    ...categoryKeys(lang),
-    [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Menyuga" : "◀️ В меню" }],
-  ];
+  return [[{ id: "cmd:menu", label: lang === "uz" ? "◀️ Menyuga" : "◀️ В меню" }]];
 }
 
 function liveMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
@@ -288,19 +250,19 @@ function liveMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
 function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
   if (lang === "uz") {
     return [
-      [{ id: "cmd:order", label: "🔧 Usta chaqirish" }, { id: "cmd:repeat", label: "🔁 Oldingi kabi" }],
+      [{ id: "cmd:order", label: "📝 Ariza" }, { id: "cmd:repeat", label: "🔁 Oldingi kabi" }],
       [{ id: "cmd:myorders", label: "📦 Arizalarim" }, { id: "cmd:profile", label: "👤 Profil" }],
-      [{ id: "cmd:balance", label: "🔓 Kirish" }, { id: "cmd:prices", label: "💵 Narxlar" }],
-      [{ id: "cmd:support", label: "📞 Operator" }, { id: "cmd:howto", label: "ℹ️ Qanday ishlaydi" }],
-      [{ id: "cmd:reviews", label: "⭐️ Izohlar" }, { id: "cmd:become", label: "👨‍🔧 Usta bo‘lish" }],
+      [{ id: "cmd:balance", label: "💰 Hisob" }, { id: "cmd:support", label: "📞 Operator" }],
+      [{ id: "cmd:ref", label: "🎁 Taklif" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
+      [{ id: "cmd:become", label: "👨‍🔧 Usta bo‘lish" }],
     ];
   }
   return [
-    [{ id: "cmd:order", label: "🔧 Вызвать мастера" }, { id: "cmd:repeat", label: "🔁 Как в прошлый раз" }],
+    [{ id: "cmd:order", label: "📝 Заявка" }, { id: "cmd:repeat", label: "🔁 Как в прошлый раз" }],
     [{ id: "cmd:myorders", label: "📦 Мои заявки" }, { id: "cmd:profile", label: "👤 Профиль" }],
-    [{ id: "cmd:balance", label: "🔓 Доступ" }, { id: "cmd:prices", label: "💵 Цены и услуги" }],
-    [{ id: "cmd:support", label: "📞 Оператор" }, { id: "cmd:howto", label: "ℹ️ Как это работает" }],
-    [{ id: "cmd:reviews", label: "⭐️ Отзывы" }, { id: "cmd:become", label: "👨‍🔧 Стать мастером" }],
+    [{ id: "cmd:balance", label: "💰 Счёт" }, { id: "cmd:support", label: "📞 Оператор" }],
+    [{ id: "cmd:ref", label: "🎁 Пригласить" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
+    [{ id: "cmd:become", label: "👨‍🔧 Стать мастером" }],
   ];
 }
 
@@ -365,41 +327,51 @@ function applyLocation(draft: Draft, lat: number, lng: number): Draft {
   };
 }
 
+function confirmStep(draft: Draft, lang: Lang | undefined, userMessage: ChatMessage): BotResult {
+  const next: Draft = { ...draft, serviceId: "other" };
+  return {
+    userMessage,
+    replies: [
+      bot(summary(next), {
+        kind: "order",
+        buttons: [[
+          { id: "confirm:yes", label: t(lang, "confirm") },
+          { id: "confirm:no", label: t(lang, "change") },
+        ]],
+      }),
+    ],
+    step: "confirm",
+    draft: next,
+  };
+}
+
 function summary(d: Draft): string {
   const lang = d.lang;
-  const svc = d.serviceId ? serviceById(d.serviceId) : undefined;
-  const svcTitle = svc ? (lang === "uz" ? SVC_UZ[svc.id] : svc.title) : "—";
   const city = d.city || (lang === "uz" ? "O‘zbekiston" : "Узбекистан");
-  const area = d.neighborhood || d.fullAddress || "—";
+  const area = d.fullAddress || d.neighborhood || "—";
+  const task = d.problem || d.comment || "—";
   const lines =
     lang === "uz"
       ? [
           "Arizani tekshiring:",
           "",
-          `Xizmat — ${svcTitle}`,
-          `Muammo — ${d.problem ?? "—"}`,
+          `Izoh — ${task}`,
           `Shahar — ${city}`,
-          `Mahalla — ${area}`,
+          `Manzil — ${area}`,
           `Geo — ${d.lat?.toFixed(5)}, ${d.lng?.toFixed(5)}`,
           `Tel — ${d.phone ?? "—"}`,
           `Foto — ${d.photos.length ? d.photos.length + " ta" : "yo‘q"}`,
-          `Izoh — ${d.comment || "yo‘q"}`,
-          d.when ? `Qachon — ${d.when}` : "Qachon — hozir",
         ]
       : [
           "Проверьте заявку:",
           "",
-          `Услуга — ${svcTitle}`,
-          `Задача — ${d.problem ?? "—"}`,
+          `Комментарий — ${task}`,
           `Город — ${city}`,
-          `Район/махалля — ${area}`,
+          `Адрес — ${area}`,
           `Геолокация — ${d.lat?.toFixed(5)}, ${d.lng?.toFixed(5)}`,
           `Телефон — ${d.phone ?? "—"}`,
           `Фото — ${d.photos.length ? d.photos.length + " шт." : "нет"}`,
-          `Комментарий — ${d.comment || "нет"}`,
-          d.when ? `Когда — ${d.when}` : "Когда — сейчас",
         ];
-  if (svc) lines.push(lang === "uz" ? `Chaqiruv — ${formatSum(svc.from)} dan` : `Выезд — от ${formatSum(svc.from)}`);
   return lines.join("\n");
 }
 
@@ -447,7 +419,7 @@ export function labelToTapId(raw: string): string | null {
   if (q === fold(RU.skipGeo) || q === fold(UZ.skipGeo)) return "geo:skip";
   if (q === fold(RU.skipComment) || q === fold(UZ.skipComment) || q.includes("изохсиз")) return "cmt:skip";
   if (q === fold(RU.confirm) || q === "подтвердить" || q === "tasdiqlash") return "confirm:yes";
-  if (q === fold(RU.change) || q.includes("измен") || q.includes("zgartir")) return "confirm:no";
+  if (q === fold(RU.change) || q === "изменить" || ((q.includes("измен") || q.includes("zgartir")) && !q.includes("локац") && !q.includes("lokatsiya"))) return "confirm:no";
   if (q === fold(RU.goOnline) || q === "я онлайн" || q.includes("onlaynman") || q.includes("на линии")) return "online:on";
   if (q === fold(RU.goOffline) || q === "я офлайн" || q.includes("oflayn") || q.includes("офлайн")) return "online:off";
   if (q.includes("повтор") || q.includes("oldingi") || q.includes("как в прошл")) return "cmd:repeat";
@@ -461,19 +433,22 @@ export function labelToTapId(raw: string): string | null {
   if (q.includes("цены") || q.includes("narxlar") || q.includes("narx va")) return "cmd:prices";
   if (q.includes("отзыв") || q.includes("izoh")) return "cmd:reviews";
   if (q.includes("как это") || q.includes("qanday ishlaydi") || q.includes("как работает")) return "cmd:howto";
+  if (q === "заявка" || q === "ariza" || q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder)) return "cmd:order";
   if (q.includes("заявк") || q.includes("ariza")) return "cmd:myorders";
   if (q.includes("активн") || q.includes("faol")) return "cmd:active";
   if (q.includes("статисти") || q.includes("statistika")) return "cmd:stats";
   if (q.includes("помощ") || q.includes("yordam") || q === "/help" || q.includes("поддерж") || q === "оператор" || q === "operator") return "cmd:support";
-  if (q.includes("друз") || q.includes("do'st") || q.includes("dostlar") || q.includes("реферал") || q === "/ref") return "cmd:ref";
+  if (q.includes("друз") || q.includes("do'st") || q.includes("dostlar") || q.includes("реферал") || q === "/ref" || q.includes("приглас") || q.includes("taklif") || q.includes("скидк") || q.includes("chegirma")) return "cmd:ref";
   if (q.includes("язык") || q === "til" || q === "/lang") return "cmd:lang";
   if (q.includes("главное меню") || q.includes("bosh menyu") || q === "🏠") return "cmd:menu";
   if (q.includes("меню") || q.includes("menyu") || q.includes("назад")) return "cmd:menu";
   if (q === fold("✅ всё верно") || q.includes("всё верно") || q.includes("hammasi to")) return "geo:ok";
   if (q.includes("другую локац") || q.includes("boshqa lokatsiya")) return "geo:new";
-  if (q.includes("новая заявка") || q.includes("yangi ariza") || q === fold(RU.newOrder) || q === fold(UZ.newOrder)) return "cmd:start";
   if (q === fold(RU.menu) || q === fold(UZ.menu)) return "cmd:menu";
   if (q.includes("отмен") || q.includes("bekor") || q === "/cancel") return "cmd:cancel";
+  if (q === "сейчас" || q === "hozir" || q === "лучше сейчас") return "when:now";
+  if (q.includes("на дату") || q.includes("sana va")) return "when:later";
+  if (q === "счет" || q === "hisob" || q.includes("на счете")) return "cmd:balance";
   return null;
 }
 
@@ -517,19 +492,29 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         draft,
       };
     }
-    if (step === "master_phone" || step === "master_geo" || (draft.role === "master" && step !== "category")) {
+    if (step === "master_phone" || step === "master_geo" || step === "master_spec" || (draft.role === "master" && step !== "category" && step !== "problem" && step !== "photo" && step !== "phone" && step !== "district" && step !== "geo" && step !== "geo_choice" && step !== "confirm" && step !== "when")) {
       return {
         userMessage: user(phone),
         replies: [bot(t(lang, "masterGeo"), { buttons: [[{ id: "geo:share", label: t(lang, "shareGeo"), requestLocation: true }]] })],
         step: "master_geo",
-        draft: { ...draft, phone },
+        draft: { ...draft, phone, serviceId: "other", role: "master" },
+      };
+    }
+    const next = { ...draft, phone, serviceId: "other" as ServiceId, role: "client" as const };
+    if (next.problem && next.lat != null && next.lng != null) return confirmStep(next, lang, user(phone));
+    if (!next.problem) {
+      return {
+        userMessage: user(phone),
+        replies: [bot(t(lang, "describe"))],
+        step: "problem",
+        draft: next,
       };
     }
     return {
       userMessage: user(phone),
-      replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
-      step: "comment",
-      draft: { ...draft, phone },
+      replies: [bot(t(lang, "askGeo"), { buttons: geoKeys(lang) })],
+      step: "district",
+      draft: next,
     };
   }
 
@@ -582,6 +567,14 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         step: "idle",
         draft: next,
         registerMaster: true,
+      };
+    }
+    if (!next.problem && step !== "photo" && step !== "district" && step !== "geo" && step !== "geo_choice") {
+      return {
+        userMessage: user("📍"),
+        replies: [bot(t(lang, "describe"))],
+        step: "problem",
+        draft: { ...next, serviceId: "other", role: "client" },
       };
     }
     return {
@@ -678,9 +671,9 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (role === "master") {
       return {
         userMessage: user(t(lang, "master")),
-        replies: [bot(t(lang, "masterSpec"), { buttons: categoryPickKeys(lang) })],
-        step: "master_spec",
-        draft: d,
+        replies: [bot(t(lang, "masterPhone"), { buttons: phoneKeys(lang) })],
+        step: "master_phone",
+        draft: { ...d, serviceId: "other" },
       };
     }
     return {
@@ -724,7 +717,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     return {
       userMessage: user(lang === "uz" ? "Narxlar" : "Цены"),
       replies: [bot(formatPrices(lang === "uz" ? "uz" : "ru"), { buttons: [
-        [{ id: "cmd:order", label: lang === "uz" ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:order", label: lang === "uz" ? "📝 Ariza" : "📝 Заявка" }],
         [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
       ] })],
       step: step === "live" ? "live" : "category",
@@ -736,7 +729,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     return {
       userMessage: user(lang === "uz" ? "Qanday ishlaydi" : "Как это работает"),
       replies: [bot(formatHowTo(lang === "uz" ? "uz" : "ru"), { buttons: [
-        [{ id: "cmd:order", label: lang === "uz" ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:order", label: lang === "uz" ? "📝 Ariza" : "📝 Заявка" }],
         [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
       ] })],
       step: step === "live" ? "live" : "category",
@@ -756,10 +749,10 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
       };
     }
     return {
-      userMessage: user(lang === "uz" ? "Usta chaqirish" : "Вызвать мастера"),
-      replies: [bot(lang === "uz" ? "Xizmatni tanlang:" : "Выберите услугу:", { buttons: categoryPickKeys(lang) })],
-      step: "category",
-      draft: { ...draft, photos: [], problem: undefined, serviceId: undefined, comment: undefined, role: "client" },
+      userMessage: user(lang === "uz" ? "Ariza" : "Заявка"),
+      replies: [bot(t(lang, "describe"))],
+      step: "problem",
+      draft: { ...draft, photos: [], problem: undefined, serviceId: "other", comment: undefined, role: "client" },
     };
   }
 
@@ -843,20 +836,11 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "master_spec") {
-    const svc = tapId.startsWith("svc:") ? serviceById(tapId.slice(4)) : matchService(raw);
-    if (!svc) {
-      return {
-        userMessage: user(raw),
-        replies: [bot(t(lang, "masterSpec"), { buttons: categoryPickKeys(lang) })],
-        step: "master_spec",
-        draft,
-      };
-    }
     return {
-      userMessage: user(lang === "uz" ? SVC_UZ[svc.id] : svc.title),
+      userMessage: user(raw || t(lang, "master")),
       replies: [bot(t(lang, "masterPhone"), { buttons: phoneKeys(lang) })],
       step: "master_phone",
-      draft: { ...draft, serviceId: svc.id },
+      draft: { ...draft, serviceId: "other", role: "master" },
     };
   }
 
@@ -886,21 +870,20 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "category") {
-    const svc = tapId.startsWith("svc:") ? serviceById(tapId.slice(4)) : matchService(raw);
-    const userMessage = user(svc ? (lang === "uz" ? SVC_UZ[svc.id] : svc.title) : raw);
-    if (!svc) {
+    const problem = raw.slice(0, 400);
+    if (problem.length < 4) {
       return {
-        userMessage,
-        replies: [bot(t(lang, "needService"), { buttons: clientMenuKeys(lang) })],
-        step: "category",
-        draft,
+        userMessage: user(raw),
+        replies: [bot(t(lang, "describe"), { buttons: clientMenuKeys(lang) })],
+        step: "problem",
+        draft: { ...draft, serviceId: "other", role: "client" },
       };
     }
     return {
-      userMessage,
-      replies: [bot(`${lang === "uz" ? SVC_UZ[svc.id] : svc.title}. ${t(lang, "describe")}`)],
-      step: "problem",
-      draft: { ...draft, serviceId: svc.id, photos: [], problem: undefined },
+      userMessage: user(problem),
+      replies: [bot(t(lang, "sendPhoto"), { buttons: [[{ id: "photo:skip", label: t(lang, "skipPhoto") }]] })],
+      step: "photo",
+      draft: { ...draft, serviceId: "other", photos: [], problem, comment: undefined, role: "client" },
     };
   }
 
@@ -913,7 +896,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
       userMessage: user(problem),
       replies: [bot(t(lang, "sendPhoto"), { buttons: [[{ id: "photo:skip", label: t(lang, "skipPhoto") }]] })],
       step: "photo",
-      draft: { ...draft, problem },
+      draft: { ...draft, problem, serviceId: "other" },
     };
   }
 
@@ -1006,46 +989,50 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         draft,
       };
     }
-    return {
-      userMessage: user(formatPhone(raw)),
-      replies: [bot(t(lang, "commentAsk"), { buttons: [[{ id: "cmt:skip", label: t(lang, "skipComment") }]] })],
-      step: "comment",
-      draft: { ...draft, phone: formatPhone(raw) },
-    };
+    return confirmStep({ ...draft, phone: formatPhone(raw), serviceId: "other" }, lang, user(formatPhone(raw)));
   }
 
   if (step === "comment") {
     const comment = tapId === "cmt:skip" || lower.includes("без коммент") || lower.includes("izohsiz") ? "" : raw.slice(0, 240);
-    const next = { ...draft, comment };
-    return {
-      userMessage: user(comment || t(lang, "skipComment")),
-      replies: [
-        bot(summary(next), {
-          kind: "order",
-          buttons: [
-            [
-              { id: "confirm:yes", label: t(lang, "confirm") },
-              { id: "confirm:no", label: t(lang, "change") },
-            ],
-          ],
-        }),
-      ],
-      step: "confirm",
-      draft: next,
-    };
+    const next = { ...draft, comment, problem: draft.problem || comment, serviceId: "other" as ServiceId };
+    if (!next.problem || next.problem.length < 4) {
+      return {
+        userMessage: user(raw),
+        replies: [bot(t(lang, "describe"))],
+        step: "problem",
+        draft: next,
+      };
+    }
+    return confirmStep(next, lang, user(comment || t(lang, "skipComment")));
   }
 
   if (step === "confirm") {
     if (tapId === "confirm:no" || lower.includes("измен") || lower.includes("zgartir")) {
       return {
         userMessage: user(t(lang, "change")),
-        replies: [bot(t(lang, "restart"), { buttons: clientMenuKeys(lang) })],
-        step: "category",
-        draft: { ...emptyDraft(), lang, role: "client", name: draft.name },
+        replies: [bot(t(lang, "describe"))],
+        step: "problem",
+        draft: { ...draft, photos: [], problem: undefined, comment: undefined, serviceId: "other", role: "client" },
       };
     }
     if (tapId === "confirm:yes" || lower.includes("подтвер") || lower.includes("tasdiq")) {
-      if (!draft.serviceId || !draft.problem || !draft.phone || draft.lat == null || draft.lng == null || !isInsideServiceArea(Number(draft.lat), Number(draft.lng))) {
+      if (!draft.problem) {
+        return {
+          userMessage: user(raw),
+          replies: [bot(t(lang, "describe"))],
+          step: "problem",
+          draft: { ...draft, serviceId: "other" },
+        };
+      }
+      if (!draft.phone) {
+        return {
+          userMessage: user(raw),
+          replies: [bot(t(lang, "needPhone"), { buttons: phoneKeys(lang) })],
+          step: "phone",
+          draft,
+        };
+      }
+      if (draft.lat == null || draft.lng == null || !isInsideServiceArea(Number(draft.lat), Number(draft.lng))) {
         return {
           userMessage: user(raw),
           replies: [bot(`${t(lang, "missing")}\n${t(lang, "askGeo")}`, { buttons: geoKeys(lang) })],
@@ -1083,7 +1070,10 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "when") {
-    if (tapId === "when:later") {
+    const q = fold(raw);
+    const later = tapId === "when:later" || q.includes("на дату") || q.includes("sana va");
+    const now = !later && (tapId === "when:now" || q === "сейчас" || q === "hozir" || q === "лучше сейчас");
+    if (later) {
       return {
         userMessage: user(raw || (lang === "uz" ? "Sana" : "На время")),
         replies: [bot(lang === "uz"
@@ -1095,8 +1085,8 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
         draft: { ...draft, when: "ask" },
       };
     }
-    if (tapId === "when:now") {
-      const next = { ...draft, when: undefined };
+    if (now) {
+      const next = { ...draft, serviceId: "other" as ServiceId, when: undefined };
       return { userMessage: user(lang === "uz" ? "Hozir" : "Сейчас"), replies: [], step: "live", draft: next, submit: next };
     }
     if (draft.when === "ask" && raw && event.type === "text") {
@@ -1109,7 +1099,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
           draft,
         };
       }
-      const next = { ...draft, when: iso };
+      const next = { ...draft, serviceId: "other" as ServiceId, when: iso };
       return { userMessage: user(raw), replies: [], step: "live", draft: next, submit: next };
     }
     return {
@@ -1173,18 +1163,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
   }
 
   if (step === "live") {
-    const svcLive = tapId.startsWith("svc:") ? serviceById(tapId.slice(4)) : matchService(raw);
-    if (svcLive) {
-      return {
-        userMessage: user(lang === "uz" ? SVC_UZ[svcLive.id] : svcLive.title),
-        replies: [bot(lang === "uz"
-          ? "Sizda faol ariza bor. Avval «Bekor qilish» — keyin yangi xizmat."
-          : "У вас уже есть заявка. Сначала «Отменить заявку» — потом новую услугу.", { buttons: liveMenuKeys(lang) })],
-        step: "live",
-        draft,
-      };
-    }
-    if (raw && !tapId.startsWith("cmd:") && !tapId.startsWith("rate:")) {
+    if (raw && !tapId.startsWith("cmd:") && !tapId.startsWith("rate:") && !tapId.startsWith("svc:")) {
       return {
         userMessage: user(raw),
         replies: [bot(lang === "uz" ? "Operatorga yubordim. Javob shu yerga keladi." : "Отправил оператору. Ответ придёт сюда.", { buttons: liveMenuKeys(lang) })],
@@ -1205,15 +1184,6 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     return { replies: [bot(t(lang, "masterDone"), { buttons: masterMenuKeys(lang) })], step: "idle", draft };
   }
 
-  const svc = matchService(raw);
-  if (svc) {
-    return {
-      userMessage: user(lang === "uz" ? SVC_UZ[svc.id] : svc.title),
-      replies: [bot(`${lang === "uz" ? SVC_UZ[svc.id] : svc.title}. ${t(lang, "describe")}`)],
-      step: "problem",
-      draft: { ...draft, serviceId: svc.id },
-    };
-  }
   return {
     userMessage: user(raw),
     replies: [bot(t(lang, "startHint"), { buttons: clientMenuKeys(lang) })],

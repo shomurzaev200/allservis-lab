@@ -8,8 +8,8 @@ import { autoAssignNearest, insertOrder, waitingOrderIds } from "./orders";
 import type { Sql, StaffWho } from "./workspace";
 import { accruePayout, parkPayout } from "./workspace";
 import { trackRefEvent } from "./refs";
-import { formatGeoCard, isInsideServiceArea, OUTSIDE_SERVICE_AREA, resolveLocation, cityFromCoords } from "@/lib/geo";
-import { displayArea, formatBecomeMaster, formatClientHome, formatHowTo, formatOpError, HR, statusLine, svcTitle } from "@/lib/tg-ui";
+import { formatGeoCard, isInsideServiceArea, OUTSIDE_SERVICE_AREA, placeLine, resolveLocation, streetFromText, cityFromCoords } from "@/lib/geo";
+import { displayArea, formatBecomeMaster, formatClientHome, formatHowTo, formatOpError, HR, statusLine } from "@/lib/tg-ui";
 
 type TgUser = { id: number; first_name?: string; last_name?: string; username?: string };
 type TgChat = { id: number; type?: string; title?: string; username?: string };
@@ -153,10 +153,16 @@ const EVENT_HEAD: Record<string, string> = {
 const ORDER_CARD_SQL = `
   select o.id, o.public_no, o.status, o.category_slug, o.description, o.phone, o.district, o.address, o.city,
          o.lat, o.lng, o.comment, o.price, o.master_payout, o.created_at, o.master_id,
-         c.name as client_name, c.telegram_id as client_tg, c.referred_by, c.ref_source,
+         c.name as client_name, c.telegram_id as client_tg, c.referred_by, c.ref_source, c.ref_code,
          cs.tg_username as client_username,
          m.telegram_id as master_tg, m.first_name, m.last_name, m.phone as master_phone,
-         m.rating, m.specialization, ms.tg_username as master_username
+         m.rating, m.specialization, ms.tg_username as master_username,
+         (select count(distinct f.id)::int
+            from as_clients f
+            join as_orders fo on fo.client_id = f.id and fo.user_id = f.user_id and fo.status = 'completed'
+           where f.user_id = o.user_id
+             and c.ref_code is not null and c.ref_code <> ''
+             and f.referred_by = c.ref_code) as ref_friends
   from as_orders o
   join as_clients c on c.id = o.client_id
   left join as_masters m on m.id = o.master_id
@@ -166,7 +172,6 @@ const ORDER_CARD_SQL = `
 `;
 
 function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "channel" | "master" = "channel", who?: StaffWho): string {
-  const svc = serviceById(String(o.category_slug ?? ""));
   const distRaw = String(o.district ?? "");
   const dist = distRaw || "не определён";
   const lat = o.lat == null ? null : Number(o.lat);
@@ -180,6 +185,8 @@ function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "c
   const geoOk = lat != null && lng != null && Number.isFinite(lat) && Number.isFinite(lng);
   const clientUser = String(o.client_username ?? "").replace(/^@/, "");
   const clientTg = String(o.client_tg ?? "");
+  const friends = Math.max(0, Number(o.ref_friends ?? 0) || 0);
+  const disc = referralPercent(friends);
   const lines = [
     `<b>${escHtml(head)} №${escHtml(String(o.public_no))}</b>`,
     `Статус: ${escHtml(STATUS_LABEL[st as OrderStatus] ?? st)}`,
@@ -193,15 +200,15 @@ function formatOrderCard(o: Record<string, unknown>, eventType: string, role: "c
     o.ref_source || o.referred_by
       ? `🎯 Источник: ${escHtml(String(o.ref_source || "ссылка"))}${o.referred_by ? ` · <code>${escHtml(String(o.referred_by))}</code>` : ""}`
       : "",
-    `📍 Район/махалля: ${escHtml(dist)}`,
-    o.address && String(o.address) && String(o.address) !== distRaw ? `🏠 Адрес: ${escHtml(String(o.address))}` : "",
+    `📍 Адрес: ${escHtml(dist)}`,
+    o.address && String(o.address) && String(o.address) !== distRaw ? `🏠 ${escHtml(String(o.address))}` : "",
     geoOk ? `🗺 Гео: <code>${lat!.toFixed(5)}, ${lng!.toFixed(5)}</code>` : "🗺 Гео: не указано",
     geoOk ? mapsLink(lat, lng) : "",
     "",
-    `🛠 Услуга: <b>${escHtml(svc?.title ?? String(o.category_slug ?? "—"))}</b>`,
-    `📝 Проблема: ${escHtml(String(o.description ?? "—"))}`,
-    o.comment ? `💬 Комментарий: ${escHtml(String(o.comment))}` : "",
-    `💰 Ориентир от ${Number(o.price ?? 0).toLocaleString("ru-RU")} сум. Цену согласуйте с клиентом.`,
+    `📝 Комментарий: ${escHtml(String(o.description ?? "—"))}`,
+    o.comment && String(o.comment) !== String(o.description ?? "") ? `💬 Ещё: ${escHtml(String(o.comment))}` : "",
+    disc > 0 ? `🎁 Скидка клиента ${disc}% — друзей с завершённым заказом: ${friends}. Учтите в цене.` : "",
+    "💰 Цену согласуйте с клиентом на месте.",
   ];
   if (who && role === "channel") {
     const roleRu = who.role === "owner" ? "владелец" : "сотрудник";
@@ -274,9 +281,6 @@ async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderI
   if (!chat || !/^\d+$/.test(chat)) return;
   const lang = o.lang === "uz" ? "uz" : "ru";
   const masterName = [o.first_name, o.last_name].filter(Boolean).join(" ") || "мастер";
-  const svc = serviceById(String(o.specialization ?? ""));
-  const eta = nSafe(o.avg_minutes) || svc?.etaMin || 30;
-  const stars = "★".repeat(Math.round(nSafe(o.rating) || 5));
   const head = clientLabel(status);
   let extra = "";
   const masterUser = String(o.master_username ?? "").replace(/^@/, "");
@@ -291,7 +295,6 @@ async function notifyClientOfMaster(sql: Sql, uid: string, token: string, orderI
       masterUser ? `💬 Telegram: @${masterUser}` : "",
       masterTg ? `Написать: tg://user?id=${masterTg}` : "",
       `⭐️ ${Number(o.rating ?? 5).toFixed(1)}`,
-      svc ? `🔧 ${svc.title}` : "",
       status === "enroute" || status === "arrived" ? "Цену согласуйте с мастером напрямую." : "",
     ]
       .filter(Boolean)
@@ -475,6 +478,7 @@ async function applyJob(sql: Sql, uid: string, token: string, masterTg: string, 
       reply_markup: markup(masterMenu("ru", true)),
     });
     await notifyClientOfMaster(sql, uid, token, orderId, "completed");
+    await creditFriendOrder(sql, uid, token, orderId);
     await drainQueue(sql, uid, token);
   } else {
     await tg(token, "sendMessage", { chat_id: Number(masterTg), text: "Эта кнопка уже не действует — статус заявки изменился." });
@@ -718,7 +722,6 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
         "",
         `👤 ${m[0].first_name} ${m[0].last_name}`,
         "",
-        `🔧 ${svcTitle(m[0].specialization)}`,
         `⭐️ ${Number(m[0].rating).toFixed(2)}`,
         "",
         `📦 Выполнено: ${m[0].completed_orders}`,
@@ -1931,7 +1934,9 @@ async function persistProfile(sql: Sql, uid: string, chatId: string, name: strin
   const lat = draft.lat ?? null;
   const lng = draft.lng ?? null;
   const city = (draft.city || (lat != null && lng != null ? cityFromCoords(Number(lat), Number(lng)) : "") || "").trim();
-  const district = (draft.neighborhood || draft.fullAddress || "").trim();
+  const street = (draft.street || streetFromText(draft.fullAddress || "") || "").trim();
+  const mahalla = (draft.neighborhood || "").trim();
+  const district = placeLine({ street, neighborhood: mahalla, fullAddress: draft.fullAddress }) || (draft.fullAddress || "").trim();
   try {
     const existing = await sql<{ id: number }>`
       select id from as_clients where user_id = ${uid} and telegram_id = ${chatId} limit 1
@@ -2111,20 +2116,37 @@ async function sendHome(sql: Sql, uid: string, token: string, chatId: string, na
 }
 
 async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: string, lang: string, _live: boolean) {
+  const sum = await clientPaidSum(sql, uid, chatId);
+  const hist = await sql<{ amount: number; status: string; created_at: string }>`
+    select amount, status, created_at::text as created_at from as_payments
+    where user_id = ${uid} and telegram_id = ${chatId}
+    order by created_at desc limit 8
+  `.catch(() => [] as { amount: number; status: string; created_at: string }[]);
   const L = lang === "uz";
   const lines = [
-    L ? "💳 TO‘LOV" : "💳 ОПЛАТА",
+    L ? "💰 HISOB" : "💰 СЧЁТ",
+    "",
+    L ? `Hozir hisobda: ${formatSum(sum)}` : `Сейчас на счёте: ${formatSum(sum)}`,
     "",
     L
-      ? "Ustaga joyida to‘laysiz. Narxni usta bilan kelishasiz. Botdan oldindan to‘lov shart emas."
-      : "Клиент платит мастеру на месте. Цену согласуете с мастером. Предоплата в боте не нужна и заявку не открывает.",
+      ? "Bu admin qo‘shgan summa. Ustaga joyida ham to‘laysiz — narxni o‘zingiz kelishasiz."
+      : "Это деньги, которые администратор зачислил на ваш счёт. Мастеру на месте цену всё равно согласуете сами.",
   ];
-  const btns: KeyboardButton[][] = [
-    [{ id: "cmd:menu", label: L ? "◀️ Orqaga" : "◀️ Назад" }],
-  ];
-  await tg(token, "sendMessage", { chat_id: Number(chatId), text: lines.join("\n"), reply_markup: markup(btns) });
-  void sql;
-  void uid;
+  if (hist.length) {
+    lines.push("", L ? "So‘nggi operatsiyalar:" : "Последние операции:");
+    for (const h of hist) {
+      const sign = h.status === "approved" ? "+" : h.status === "cancelled" || h.status === "rejected" ? "−" : "…";
+      const label = h.status === "approved" ? (L ? "kiritildi" : "зачислено") : h.status === "cancelled" ? (L ? "bekor" : "отменено") : h.status === "rejected" ? (L ? "rad" : "отклонено") : (L ? "kutilmoqda" : "на проверке");
+      lines.push(`${sign}${Number(h.amount).toLocaleString("ru-RU")} сум · ${label}`);
+    }
+  } else {
+    lines.push("", L ? "Hali operatsiya yo‘q." : "Операций пока нет.");
+  }
+  await tg(token, "sendMessage", {
+    chat_id: Number(chatId),
+    text: lines.join("\n"),
+    reply_markup: markup([[{ id: "cmd:menu", label: L ? "◀️ Orqaga" : "◀️ Назад" }]]),
+  });
 }
 
 async function sendReviews(sql: Sql, uid: string, token: string, chatId: string, lang: string, live: boolean, masterId?: number) {
@@ -2177,7 +2199,7 @@ async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: st
       chat_id: Number(chatId),
       text: L ? "📦 ARIZALARIM\n\nHali ariza yo‘q." : "📦 МОИ ЗАЯВКИ\n\nЗаявок пока нет.",
       reply_markup: markup([
-        [{ id: "cmd:order", label: L ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:order", label: L ? "📝 Ariza" : "📝 Заявка" }],
         [{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
       ]),
     });
@@ -2187,9 +2209,8 @@ async function sendClientOrders(sql: Sql, uid: string, token: string, chatId: st
     const area = displayArea(x.district, x.lat, x.lng, L ? "uz" : "ru");
     const when = x.created_at ? new Date(x.created_at).toLocaleString("ru-RU", { timeZone: "Asia/Tashkent", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }) : "";
     return [
-      `${statusLine(x.status, L ? "uz" : "ru").slice(0, 2)} Заявка №${x.public_no}`.replace("Заявка", L ? "Ariza" : "Заявка"),
+      `${statusLine(x.status, L ? "uz" : "ru").slice(0, 2)} ${L ? "Ariza" : "Заявка"} №${x.public_no}`,
       "",
-      svcTitle(x.category_slug, L ? "uz" : "ru"),
       `📍 ${area}`,
       when ? `📅 ${when}` : "",
       "",
@@ -2232,10 +2253,7 @@ async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId:
     "",
     HR,
     "",
-    L ? "🔧 Xizmat:" : "🔧 Услуга:",
-    svcTitle(o.category_slug, L ? "uz" : "ru"),
-    "",
-    L ? "📝 Muammo:" : "📝 Проблема:",
+    L ? "📝 Izoh:" : "📝 Комментарий:",
     o.description || "—",
     "",
     L ? "📍 Joy:" : "📍 Местоположение:",
@@ -2265,7 +2283,7 @@ async function sendClientOrderCard(sql: Sql, uid: string, token: string, chatId:
     if (o.master_phone) btns.push([{ id: `callm:${o.id}`, label: L ? "📞 Bog‘lanish" : "📞 Связаться" }]);
     btns.push([{ id: "cmd:myorders", label: L ? "📦 Arizalar" : "📦 Мои заявки" }]);
   } else if (o.status === "completed") {
-    btns.push([{ id: "cmd:order", label: L ? "🔄 Qayta chaqirish" : "🔄 Заказать снова" }]);
+    btns.push([{ id: "cmd:order", label: L ? "📝 Yana ariza" : "📝 Новая заявка" }]);
   }
   btns.push([{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }]);
   await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(btns) });
@@ -2291,14 +2309,15 @@ async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: s
   `;
   const row = c[0];
   const L = lang === "uz";
-  const area = displayArea(row?.district, row?.lat, row?.lng, L ? "uz" : "ru");
+  const address = (row?.district || "").trim();
   const cityShow = (row?.lat != null && row?.lng != null ? cityFromCoords(Number(row.lat), Number(row.lng)) : "")
-    || area
     || (L ? "aniqlanmadi" : "не определён");
+  const balance = await clientPaidSum(sql, uid, chatId);
+  const refCode = await ensureRefCode(sql, uid, chatId);
+  const friends = await qualifiedReferrals(sql, uid, refCode);
+  const pct = referralPercent(friends);
   const active = (row?.orders_count ?? 0) - (row?.completed_count ?? 0);
-  const geoLine = row?.lat != null && row?.lng != null
-    ? `${cityShow}${area && area !== cityShow ? ", " + area : ""}`
-    : (L ? "lokatsiya yo‘q" : "локация не указана");
+  const geoLine = address || (row?.lat != null ? `${cityShow}` : (L ? "lokatsiya yo‘q" : "локация не указана"));
   const text = [
     L ? "👤 MENING PROFILIM" : "👤 МОЙ ПРОФИЛЬ",
     "",
@@ -2309,11 +2328,14 @@ async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: s
     `📱 ${row?.phone || "—"}`,
     "",
     `📍 ${cityShow}`,
-    `📍 ${L ? "Tuman" : "Район"}: ${area}`,
+    `🏠 ${address || (L ? "ko‘cha aniqlanmadi — lokatsiyani qayta yuboring" : "улица не определена — отправьте геолокацию ещё раз")}`,
     "",
     HR,
     "",
-    L ? "💳 To‘lov ustaga joyida. Narxni kelishasiz." : "💳 Оплата мастеру на месте. Цену согласуете с ним.",
+    L ? "💰 Hisob" : "💰 На счёте",
+    formatSum(balance),
+    "",
+    L ? `🎁 Chegirma: ${pct}% · do‘stlar: ${friends}` : `🎁 Скидка: ${pct}% · друзей с заказом: ${friends}`,
     "",
     L ? "📦 Jami arizalar" : "📦 Всего заявок",
     String(row?.orders_count ?? 0),
@@ -2335,9 +2357,80 @@ async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: s
     reply_markup: markup([
       [{ id: "cmd:myorders", label: L ? "📦 Arizalar" : "📦 Мои заявки" }, { id: "cmd:support", label: L ? "💬 Operator" : "💬 Оператор" }],
       [{ id: "cmd:loc", label: L ? "📍 Lokatsiya" : "📍 Изменить локацию" }, { id: "cmd:become", label: L ? "👨‍🔧 Usta" : "👨‍🔧 Стать мастером" }],
-      [{ id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
+      [{ id: "cmd:ref", label: L ? "🎁 Taklif" : "🎁 Пригласить" }, { id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
     ]),
   });
+}
+
+function referralPercent(n: number) {
+  const x = Math.floor(Number(n) || 0);
+  return x > 0 ? Math.min(50, x) : 0;
+}
+
+async function qualifiedReferrals(sql: Sql, uid: string, code: string): Promise<number> {
+  if (!code.startsWith("r_")) return 0;
+  try {
+    const rows = await sql<{ n: number }>`
+      select count(distinct c.id)::int as n
+      from as_clients c
+      join as_orders o on o.client_id = c.id and o.user_id = c.user_id and o.status = 'completed'
+      where c.user_id = ${uid} and c.referred_by = ${code}
+    `;
+    return Number(rows[0]?.n ?? 0);
+  } catch {
+    return 0;
+  }
+}
+
+export async function creditCompletedReferral(sql: Sql, uid: string, orderId: number) {
+  try {
+    const ws = await sql<{ bot_token: string | null }>`select bot_token from as_workspace where user_id = ${uid} limit 1`;
+    const token = ws[0]?.bot_token;
+    if (!token) return;
+    await creditFriendOrder(sql, uid, token, orderId);
+  } catch { /* ignore */ }
+}
+
+async function creditFriendOrder(sql: Sql, uid: string, token: string, orderId: number) {
+  try {
+    const row = await sql<{ telegram_id: string | null; referred_by: string | null; name: string | null }>`
+      select c.telegram_id, c.referred_by, c.name
+      from as_orders o
+      join as_clients c on c.id = o.client_id
+      where o.user_id = ${uid} and o.id = ${orderId}
+      limit 1
+    `;
+    const code = String(row[0]?.referred_by || "");
+    const friendTg = String(row[0]?.telegram_id || "");
+    if (!code.startsWith("r_") || !friendTg) return;
+    const prior = await sql<{ n: number }>`
+      select count(*)::int as n
+      from as_orders o
+      join as_clients c on c.id = o.client_id
+      where o.user_id = ${uid} and c.telegram_id = ${friendTg}
+        and o.status = 'completed' and o.id <> ${orderId}
+    `;
+    if (Number(prior[0]?.n ?? 0) > 0) return;
+    const dup = await sql<{ id: number }>`
+      select id from as_ref_events
+      where user_id = ${uid} and code = ${code} and kind = 'qualified' and telegram_id = ${friendTg}
+      limit 1
+    `;
+    if (dup[0]) return;
+    await trackRefEvent(sql, uid, code, "qualified", friendTg);
+    const inv = await sql<{ telegram_id: string | null }>`
+      select telegram_id from as_clients where user_id = ${uid} and ref_code = ${code} limit 1
+    `;
+    const invTg = String(inv[0]?.telegram_id || "");
+    if (!invTg || invTg === friendTg) return;
+    const n = await qualifiedReferrals(sql, uid, code);
+    const pct = referralPercent(n);
+    const friend = (row[0]?.name || "Друг").trim();
+    await tg(token, "sendMessage", {
+      chat_id: Number(invTg),
+      text: `🎁 ${friend} завершил заказ.\nРефералов с заказом: ${n}\nВаша скидка: ${pct}%\n\nПросто /start не считается. Плюс один — только после завершённого заказа.`,
+    });
+  } catch { /* ignore */ }
 }
 
 async function sendClientRef(sql: Sql, uid: string, token: string, chatId: string, name: string, lang: string, live: boolean) {
@@ -2345,13 +2438,44 @@ async function sendClientRef(sql: Sql, uid: string, token: string, chatId: strin
   const code = await ensureRefCode(sql, uid, chatId);
   const botRow = await sql<{ bot_username: string | null }>`select bot_username from as_workspace where user_id = ${uid}`;
   const uname = (botRow[0]?.bot_username ?? "").replace(/^@/, "");
-  const link = uname && code ? `https://t.me/${uname}?start=${code}` : (code ? `Код: ${code}` : "");
-  const invited = code
+  const link = uname && code ? `https://t.me/${uname}?start=${code}` : (code ? code : "");
+  const opened = code
     ? await sql<{ n: number }>`select count(*)::int as n from as_clients where user_id = ${uid} and referred_by = ${code}`
     : [{ n: 0 }];
-  const text = lang === "uz"
-    ? `Sizning shaxsiy havolangiz (faqat sizniki):\n${link || "Avval /start"}\n\nTaklif qilingan: ${invited[0]?.n ?? 0}`
-    : `Ваша уникальная ссылка (только для этого аккаунта):\n${link || "Напишите /start ещё раз"}\n\nПриглашено друзей: ${invited[0]?.n ?? 0}\nДруг открывает ссылку — вы в статистике «Рефералы».`;
+  const done = await qualifiedReferrals(sql, uid, code);
+  const pct = referralPercent(done);
+  const openedN = Number(opened[0]?.n ?? 0);
+  const L = lang === "uz";
+  const text = L
+    ? [
+        "🎁 DO‘ST TAKLIF QILING",
+        "",
+        "Har bir hisobning o‘z havolasi bor. Havolani yuboring.",
+        link || "Avval /start bosing",
+        "",
+        `Havolani ochganlar: ${openedN} — bu hisoblanmaydi`,
+        `Buyurtmani yakunlaganlar: ${done}`,
+        `Sizning chegirmangiz: ${pct}%`,
+        "",
+        "1 do‘st = 1%. 10 do‘st = 10%. Eng ko‘pi 50%.",
+        "Faqat /start bosish hisoblanmaydi. Do‘st kamida bitta buyurtmani yakunlasa — +1.",
+      ].join("\n")
+    : [
+        "🎁 ПРИГЛАСИТЕ ДРУГА",
+        "",
+        "У каждого аккаунта своя ссылка. Отправьте её другу:",
+        link || "Напишите /start ещё раз",
+        "",
+        `Открыли ссылку: ${openedN} — это не считается`,
+        `Завершили заказ: ${done}`,
+        `Ваша скидка: ${pct}%`,
+        "",
+        "1 друг с завершённым заказом = 1%.",
+        "10 друзей = 10%. Максимум 50%.",
+        "Если человек только нажал /start и ничего не заказал — плюс не ставится.",
+        "Плюс один появляется после его первого завершённого заказа.",
+        "Скидку мастер видит в заявке и учитывает в цене на месте.",
+      ].join("\n");
   await tg(token, "sendMessage", { chat_id: Number(chatId), text, reply_markup: markup(kbClient(lang, live)) });
 }
 
@@ -2407,7 +2531,6 @@ async function upsertMasterFromBot(sql: Sql, uid: string, chatId: string, name: 
       [
         "<b>🛠 Новый мастер в боте</b>",
         `👤 <b>${escHtml(name)}</b>`,
-        `🛠 ${escHtml(serviceById(spec)?.title ?? spec)}`,
         phone ? `📞 <code>${escHtml(phone)}</code>` : "",
         dist ? `🏙 ${escHtml(dist)}` : "",
       ].filter(Boolean).join("\n"),
@@ -2740,7 +2863,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       const created = await insertOrder(sql, uid, {
         name,
         phone: p.phone,
-        category: p.category_slug,
+        category: "other",
         description: p.description,
         district: p.district,
         address: p.address,
@@ -2857,22 +2980,19 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       });
       return { ok: true };
     }
-    const next = { ...draft, role: "master" as const };
+    const next = { ...draft, role: "master" as const, serviceId: "other" as const };
     await sql`
       insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
-      values (${uid}, ${chatId}, ${"master_spec"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
-      on conflict (user_id, chat_id) do update set step = ${"master_spec"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+      values (${uid}, ${chatId}, ${"master_phone"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+      on conflict (user_id, chat_id) do update set step = ${"master_phone"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
     `;
     await tg(token, "sendMessage", {
       chat_id: Number(chatId),
       text: lang === "uz"
-        ? "👨‍🔧 RO‘YXATDAN O‘TISH\n\nQaysi mutaxassislik? Tugmani bosing."
-        : "👨‍🔧 РЕГИСТРАЦИЯ МАСТЕРА\n\nКакая специальность? Нажмите кнопку услуги.",
+        ? "👨‍🔧 RO‘YXATDAN O‘TISH\n\nTelefon raqamingizni yuboring. Mutaxassislik so‘ralmaydi."
+        : "👨‍🔧 РЕГИСТРАЦИЯ МАСТЕРА\n\nОтправьте номер телефона. Специальность не спрашиваем — дальше только геолокация.",
       reply_markup: markup([
-        [{ id: "svc:plumb", label: lang === "uz" ? "🚰 Santexnik" : "🚰 Сантехник" }, { id: "svc:elec", label: lang === "uz" ? "🔌 Elektrik" : "🔌 Электрик" }],
-        [{ id: "svc:ac", label: lang === "uz" ? "❄️ Konditsioner" : "❄️ Кондиционер" }, { id: "svc:appliance", label: lang === "uz" ? "📺 Texnika" : "📺 Бытовая техника" }],
-        [{ id: "svc:furniture", label: lang === "uz" ? "🪚 Mebel" : "🪚 Сборка мебели" }, { id: "svc:lock", label: lang === "uz" ? "🔑 Quflar" : "🔑 Замки и двери" }],
-        [{ id: "svc:paint", label: lang === "uz" ? "🎨 Bo‘yoqchi" : "🎨 Маляр" }, { id: "svc:other", label: lang === "uz" ? "🏠 Boshqa" : "🏠 Другое" }],
+        [{ id: "phone:share", label: lang === "uz" ? "📱 Raqamni yuborish" : "📱 Отправить номер", requestContact: true }],
         [{ id: "cmd:menu", label: lang === "uz" ? "◀️ Orqaga" : "◀️ Назад" }],
       ]),
     });
@@ -2884,7 +3004,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
       chat_id: Number(chatId),
       text: lang === "uz" ? formatHowTo("uz") : formatHowTo("ru"),
       reply_markup: markup([
-        [{ id: "cmd:order", label: lang === "uz" ? "🔧 Usta chaqirish" : "🔧 Вызвать мастера" }],
+        [{ id: "cmd:order", label: lang === "uz" ? "📝 Ariza" : "📝 Заявка" }],
         [{ id: "cmd:menu", label: lang === "uz" ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
       ]),
     });
@@ -2982,14 +3102,15 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
 
   if (msg?.location) {
     const geo = await resolveLocation(msg.location.latitude, msg.location.longitude);
+    const street = [geo.street, geo.house].filter(Boolean).join(", ") || streetFromText(geo.fullAddress);
     draft = {
       ...draft,
       lat: geo.lat,
       lng: geo.lng,
-      city: geo.inside ? geo.city : geo.city,
-      neighborhood: geo.inside ? geo.neighborhood : undefined,
-      street: geo.inside ? geo.street : undefined,
-      fullAddress: geo.inside ? geo.fullAddress : undefined,
+      city: geo.city,
+      neighborhood: geo.neighborhood || geo.district || undefined,
+      street: street || undefined,
+      fullAddress: placeLine(geo) || geo.fullAddress,
       districtId: undefined,
     };
     const card = formatGeoCard(geo, lang);
@@ -3068,7 +3189,7 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
   if (result.submit) {
     const lat = Number(result.submit.lat);
     const lng = Number(result.submit.lng);
-    const svc = result.submit.serviceId ? serviceById(result.submit.serviceId) : undefined;
+    const svc = serviceById(result.submit.serviceId || "other") ?? serviceById("other");
     if (svc && result.submit.problem && result.submit.phone && Number.isFinite(lat) && Number.isFinite(lng)) {
       const sub = await clientMustSubscribe(sql, uid, token, from.id);
       if (sub.block) {
@@ -3088,11 +3209,11 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
         const created = await insertOrder(sql, uid, {
           name,
           phone: result.submit.phone,
-          category: svc.id,
+          category: "other",
           description: result.submit.problem,
-          district: geo.neighborhood || geo.district || "",
+          district: placeLine(geo) || geo.neighborhood || geo.district || "",
           city: geo.city,
-          address: geo.fullAddress,
+          address: geo.fullAddress || placeLine(geo),
           neighborhood: geo.neighborhood,
           lat,
           lng,
@@ -3109,15 +3230,16 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
           on conflict (user_id, chat_id) do update set step = ${"live"}, draft = ${JSON.stringify({ ...draft, city: geo.city })}, live_order_id = ${created.id}, last_status = ${statusNow}, tg_name = ${name}, updated_at = now()
         `;
         const place = geo.city || hit?.city || (lang === "uz" ? "O‘zbekiston" : "Узбекистан");
+        const mine = await ensureRefCode(sql, uid, chatId);
+        const friends = await qualifiedReferrals(sql, uid, mine);
+        const pct = referralPercent(friends);
         const replyText = [
           lang === "uz" ? "✅ ARIZA YARATILDI" : "✅ ЗАЯВКА СОЗДАНА",
           "",
           `📦 №${created.publicNo}`,
           `📍 ${place}`,
-          geo.neighborhood ? `📍 ${geo.neighborhood}` : "",
-          "",
-          lang === "uz" ? "🔧 Xizmat:" : "🔧 Услуга:",
-          svcTitle(svc.id, lang === "uz" ? "uz" : "ru"),
+          placeLine(geo) ? `🏠 ${placeLine(geo)}` : "",
+          pct ? (lang === "uz" ? `🎁 Chegirma: ${pct}%` : `🎁 Ваша скидка: ${pct}%. Мастер учтёт её в цене.`) : "",
           "",
           hit
             ? (lang === "uz"

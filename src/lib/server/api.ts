@@ -2,11 +2,11 @@ import { createServerFn } from "@tanstack/react-start";
 import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { SERVICES } from "@/lib/catalog";
-import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
+import { ASSIGNABLE, formatSum, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
 import { assignmentCity, isInsideServiceArea } from "@/lib/geo";
 import { addAudit, addEvent, addNote, accruePayout, parkPayout, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
-import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting, dispatchOrder, dispatchWaiting } from "./telegram";
+import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting, dispatchOrder, dispatchWaiting, creditCompletedReferral } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
 
 async function ctxSql(userId: string) {
@@ -581,6 +581,7 @@ export const masterAdvance = createServerFn({ method: "POST" })
       if (!updated[0]) return { success: false as const, error: "WRONG_STATUS" };
       await sql`update as_masters set completed_orders = completed_orders + 1, last_seen = now() where user_id = ${uid} and id = ${data.masterId}`;
       await parkPayout(sql, uid, data.masterId, data.orderId, n(order.master_payout));
+      await creditCompletedReferral(sql, uid, data.orderId);
     } else if (data.to === "enroute") {
       const updated = await sql<{ id: number }>`
         update as_orders set status = 'enroute', updated_at = now()
@@ -1416,30 +1417,61 @@ async function notifyClientPay(sql: Awaited<ReturnType<typeof getSql>>, uid: str
   } catch { /* ignore */ }
 }
 
+async function clientBalance(
+  sql: Awaited<ReturnType<typeof getSql>>,
+  uid: string,
+  clientId: number | null,
+  telegramId: string | null,
+) {
+  const rows = await sql<{ n: number }>`
+    select coalesce(sum(amount), 0)::int as n from as_payments
+    where user_id = ${uid} and status = 'approved'
+      and (
+        (${clientId ?? 0} > 0 and client_id = ${clientId ?? 0})
+        or (${telegramId ?? ""} <> '' and telegram_id = ${telegramId ?? ""})
+      )
+  `;
+  return Number(rows[0]?.n ?? 0);
+}
+
 export const addManualPayment = createServerFn({ method: "POST" })
   .middleware([authMiddleware])
   .validator((d: { clientId: number; amount?: number }) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
     requireAdmin(actor);
-    if (!can(actor, "finance")) return { ok: false as const, error: NO_PERM };
+    if (!can(actor, "finance")) return { ok: false as const, error: NO_PERM, balance: 0, duplicate: false };
     const client = await sql<{ id: number; name: string; telegram_id: string | null; paid: boolean }>`
       select id, name, telegram_id, paid from as_clients where user_id = ${uid} and id = ${data.clientId}
     `;
-    if (!client[0]) return { ok: false as const, error: "Клиент не найден" };
-    let amount = Math.max(0, Math.round(Number(data.amount ?? 0) || 0));
-    if (!amount) {
-      const ws = await sql<{ pay_amount: number }>`select pay_amount from as_workspace where user_id = ${uid}`;
-      amount = n(ws[0]?.pay_amount);
+    if (!client[0]) return { ok: false as const, error: "Клиент не найден", balance: 0, duplicate: false };
+    const amount = Math.round(Number(data.amount ?? 0) || 0);
+    if (amount <= 0) return { ok: false as const, error: "Укажите сумму больше нуля", balance: 0, duplicate: false };
+    const recent = await sql<{ id: number }>`
+      select id from as_payments
+      where user_id = ${uid} and client_id = ${client[0].id} and amount = ${amount}
+        and screenshot = ${"manual"} and status = 'approved'
+        and created_at > now() - interval '90 seconds'
+      limit 1
+    `;
+    if (recent[0]) {
+      const balance = await clientBalance(sql, uid, client[0].id, client[0].telegram_id);
+      return { ok: true as const, error: null, balance, duplicate: true };
     }
     await sql`
       insert into as_payments (user_id, client_id, telegram_id, client_name, amount, screenshot, status, reviewed_at)
       values (${uid}, ${client[0].id}, ${client[0].telegram_id}, ${client[0].name}, ${amount}, ${"manual"}, ${"approved"}, now())
     `;
     await sql`update as_clients set paid = true, paid_at = now() where user_id = ${uid} and id = ${client[0].id}`;
+    const balance = await clientBalance(sql, uid, client[0].id, client[0].telegram_id);
     await addAudit(sql, uid, "add_pay", "client", String(client[0].id), null, `${client[0].name} · ${amount}`, who(actor));
-    await notifyClientPay(sql, uid, client[0].telegram_id, "Оплата подтверждена администратором. Напишите /start — можно создавать заявки.");
-    return { ok: true as const, error: null };
+    await notifyClientPay(
+      sql,
+      uid,
+      client[0].telegram_id,
+      `На счёт зачислено ${formatSum(amount)}.\nСейчас на счёте: ${formatSum(balance)}.`,
+    );
+    return { ok: true as const, error: null, balance, duplicate: false };
   });
 
 export const revokePayment = createServerFn({ method: "POST" })
@@ -1462,14 +1494,13 @@ export const revokePayment = createServerFn({ method: "POST" })
       telegramId = row[0].telegram_id;
       name = row[0].client_name;
       const still = await refreshClientPaid(sql, uid, clientId, telegramId);
+      const balance = await clientBalance(sql, uid, clientId, telegramId);
       await addAudit(sql, uid, "revoke_pay", "payment", String(data.id), name, "cancelled", who(actor));
       await notifyClientPay(
         sql,
         uid,
         telegramId,
-        still
-          ? "Один платёж отменён. Доступ к заявкам сохранён — есть другая подтверждённая оплата."
-          : "Доступ закрыт. Чтобы снова вызывать мастера — оплатите доступ.",
+        `Пополнение отменено.\nСейчас на счёте: ${formatSum(balance)}.`,
       );
       return { ok: true as const, error: null, access: still };
     } else if (clientId) {
@@ -1483,14 +1514,13 @@ export const revokePayment = createServerFn({ method: "POST" })
       telegramId = row[0].telegram_id;
       name = row[0].client_name;
       const still = await refreshClientPaid(sql, uid, clientId, telegramId);
+      const balance = await clientBalance(sql, uid, clientId, telegramId);
       await addAudit(sql, uid, "revoke_pay", "client", String(clientId), name, "cancelled", who(actor));
       await notifyClientPay(
         sql,
         uid,
         telegramId,
-        still
-          ? "Последний платёж отменён. Доступ сохранён — есть другая подтверждённая оплата."
-          : "Доступ закрыт. Чтобы снова вызывать мастера — оплатите доступ.",
+        `Пополнение отменено.\nСейчас на счёте: ${formatSum(balance)}.`,
       );
       return { ok: true as const, error: null, access: still };
     }
