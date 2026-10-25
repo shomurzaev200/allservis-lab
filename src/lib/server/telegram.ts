@@ -659,7 +659,7 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
     if (on) await drainQueue(sql, uid, token);
     return true;
   }
-  if (tapId === "cmd:stats" || tapId === "cmd:profile" || tapId === "cmd:mbalance") {
+  if (tapId === "cmd:stats" || tapId === "cmd:mprofile" || tapId === "cmd:mbalance") {
     const extra = await sql<{ accepted_orders: number; rejected_orders: number; city: string }>`
       select accepted_orders, rejected_orders, city from as_masters where id = ${m[0].id}
     `;
@@ -681,6 +681,7 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
       select coalesce(sum(master_payout),0)::int as n from as_orders
       where master_id = ${m[0].id} and status = 'completed' and completed_at >= date_trunc('month', now())
     `.catch(() => [{ n: 0 }]);
+    const wallet = await clientPaidSum(sql, uid, chatId);
     if (tapId === "cmd:mbalance") {
       let pending = 0;
       let paidOut = 0;
@@ -698,9 +699,12 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
       await tg(token, "sendMessage", {
         chat_id: Number(chatId),
         text: [
-          "💰 НАЧИСЛЕНИЯ",
+          "💰 НАЧИСЛЕНИЯ МАСТЕРА",
           "",
-          `Начислено (клиент подтвердил): ${formatSum(earned)}`,
+          `💳 На счёте клиента: ${formatSum(wallet)}`,
+          "Это пополнение из админки. Кнопка «Счёт» в меню клиента открывает его.",
+          "",
+          `Заработок (клиент подтвердил): ${formatSum(earned)}`,
           `Ждёт подтверждения клиента: ${formatSum(pending)}`,
           `Уже выплачено кассой: ${formatSum(paidOut)}`,
           `Осталось получить: ${formatSum(Math.max(0, earned - paidOut))}`,
@@ -730,7 +734,8 @@ async function handleMasterMenu(sql: Sql, uid: string, token: string, chatId: st
         "",
         HR,
         "",
-        `💰 Баланс: ${formatSum(Number(m[0].earnings))}`,
+        `💳 На счёте: ${formatSum(wallet)}`,
+        `💰 Заработок: ${formatSum(Number(m[0].earnings))}`,
         `📍 ${extra[0]?.city || area || "город не определён"}`,
         "",
         st,
@@ -2077,8 +2082,19 @@ function navKb(lang: string | undefined, live: boolean) {
 async function clientPaidSum(sql: Sql, uid: string, chatId: string): Promise<number> {
   try {
     const rows = await sql<{ n: number }>`
-      select coalesce(sum(amount), 0)::int as n from as_payments
-      where user_id = ${uid} and telegram_id = ${chatId} and status = 'approved'
+      select coalesce(sum(p.amount), 0)::int as n
+      from as_payments p
+      where p.user_id = ${uid}
+        and p.status = 'approved'
+        and (
+          p.telegram_id = ${chatId}
+          or exists (
+            select 1 from as_clients c
+            where c.user_id = p.user_id
+              and c.id = p.client_id
+              and c.telegram_id = ${chatId}
+          )
+        )
     `;
     return Number(rows[0]?.n ?? 0);
   } catch {
@@ -2118,9 +2134,19 @@ async function sendHome(sql: Sql, uid: string, token: string, chatId: string, na
 async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: string, lang: string, _live: boolean) {
   const sum = await clientPaidSum(sql, uid, chatId);
   const hist = await sql<{ amount: number; status: string; created_at: string }>`
-    select amount, status, created_at::text as created_at from as_payments
-    where user_id = ${uid} and telegram_id = ${chatId}
-    order by created_at desc limit 8
+    select p.amount, p.status, p.created_at::text as created_at
+    from as_payments p
+    where p.user_id = ${uid}
+      and (
+        p.telegram_id = ${chatId}
+        or exists (
+          select 1 from as_clients c
+          where c.user_id = p.user_id
+            and c.id = p.client_id
+            and c.telegram_id = ${chatId}
+        )
+      )
+    order by p.created_at desc limit 8
   `.catch(() => [] as { amount: number; status: string; created_at: string }[]);
   const L = lang === "uz";
   const lines = [
@@ -2145,7 +2171,7 @@ async function sendClientBalance(sql: Sql, uid: string, token: string, chatId: s
   await tg(token, "sendMessage", {
     chat_id: Number(chatId),
     text: lines.join("\n"),
-    reply_markup: markup([[{ id: "cmd:menu", label: L ? "◀️ Orqaga" : "◀️ Назад" }]]),
+    reply_markup: markup(kbClient(lang, _live)),
   });
 }
 
@@ -2356,7 +2382,7 @@ async function sendClientProfile(sql: Sql, uid: string, token: string, chatId: s
     text,
     reply_markup: markup([
       [{ id: "cmd:myorders", label: L ? "📦 Arizalar" : "📦 Мои заявки" }, { id: "cmd:support", label: L ? "💬 Operator" : "💬 Оператор" }],
-      [{ id: "cmd:loc", label: L ? "📍 Lokatsiya" : "📍 Изменить локацию" }, { id: "cmd:become", label: L ? "👨‍🔧 Usta" : "👨‍🔧 Стать мастером" }],
+      [{ id: "cmd:loc", label: L ? "📍 Lokatsiya" : "📍 Изменить локацию" }, { id: "cmd:become", label: L ? "👨‍🔧 Men ustaman" : "👨‍🔧 Я мастер" }],
       [{ id: "cmd:ref", label: L ? "🎁 Taklif" : "🎁 Пригласить" }, { id: "cmd:menu", label: L ? "🏠 Bosh menyu" : "🏠 Главное меню" }],
     ]),
   });
@@ -2764,6 +2790,9 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
         } catch { /* ignore */ }
       }
       const nextDraft = { ...d0, name, role: live ? d0.role : "client", photos: [] as string[], problem: undefined, serviceId: undefined, comment: undefined };
+      if (!live) {
+        try { await sql`update as_clients set role = ${"client"} where user_id = ${uid} and telegram_id = ${chatId}`; } catch { /* ignore */ }
+      }
       await sql`
         insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
         values (${uid}, ${chatId}, ${live ? "live" : "category"}, ${JSON.stringify(nextDraft)}, ${sess0[0]?.live_order_id ?? null}, ${sess0[0]?.last_status ?? null}, ${name}, now())
@@ -2897,12 +2926,25 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     if (oid) await sendClientOrderCard(sql, uid, token, chatId, oid, lang, live);
     return { ok: true };
   }
-  if (tapGuess === "cmd:balance" || tapGuess === "cmd:mbalance") {
+  if (tapGuess === "cmd:mbalance") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    if (masterExists[0] && (draft.role === "master" || tapGuess === "cmd:mbalance")) {
+    if (masterExists[0]) {
       await handleMasterMenu(sql, uid, token, chatId, "cmd:mbalance");
       return { ok: true };
     }
+    await sendClientBalance(sql, uid, token, chatId, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "cmd:balance") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const next = { ...draft, role: "client" as const };
+    try {
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${live ? "live" : "category"}, ${JSON.stringify(next)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${live ? "live" : "category"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+      `;
+    } catch { /* ignore */ }
     await sendClientBalance(sql, uid, token, chatId, lang, live);
     return { ok: true };
   }
@@ -2947,25 +2989,69 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     await sendClientRef(sql, uid, token, chatId, name, lang, live);
     return { ok: true };
   }
-  if (tapGuess === "cmd:profile") {
+  if (tapGuess === "cmd:mprofile") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    if (masterExists[0] && draft.role === "master") {
-      await handleMasterMenu(sql, uid, token, chatId, "cmd:profile");
+    if (masterExists[0]) {
+      await handleMasterMenu(sql, uid, token, chatId, "cmd:mprofile");
       return { ok: true };
     }
-    await persistProfile(sql, uid, chatId, name, draft);
+  }
+  if (tapGuess === "cmd:profile") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const next = { ...draft, role: "client" as const };
+    try {
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${live ? "live" : "category"}, ${JSON.stringify(next)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${live ? "live" : "category"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+      `;
+    } catch { /* ignore */ }
+    await persistProfile(sql, uid, chatId, name, next);
     await sendClientProfile(sql, uid, token, chatId, lang, live);
+    return { ok: true };
+  }
+  if (tapGuess === "role:client") {
+    if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
+    const next = { ...draft, role: "client" as const };
+    try {
+      await sql`update as_clients set role = ${"client"} where user_id = ${uid} and telegram_id = ${chatId}`;
+    } catch { /* ignore */ }
+    try {
+      await sql`
+        insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
+        values (${uid}, ${chatId}, ${live ? "live" : "category"}, ${JSON.stringify(next)}, ${sess[0]?.live_order_id ?? null}, ${sess[0]?.last_status ?? null}, ${name}, now())
+        on conflict (user_id, chat_id) do update set step = ${live ? "live" : "category"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
+      `;
+    } catch { /* ignore */ }
+    await tg(token, "sendMessage", {
+      chat_id: Number(chatId),
+      text: lang === "uz"
+        ? "Mijoz rejimidasiz. Ariza, hisob va profil shu yerda.\nUsta kabinetiga qaytish: «Men ustaman»."
+        : "Режим клиента. Заявка, счёт и профиль — здесь.\nКабинет мастера: «Я мастер».",
+      reply_markup: markup(kbClient(lang, live)),
+    });
+    try { await sendHome(sql, uid, token, chatId, name, lang, live); } catch { /* menu already sent */ }
     return { ok: true };
   }
   if (tapGuess === "cmd:become" || tapGuess === "role:master") {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
     if (masterExists[0]) {
       const next = { ...draft, role: "master" as const };
+      try {
+        await sql`update as_clients set role = ${"master"} where user_id = ${uid} and telegram_id = ${chatId}`;
+      } catch { /* ignore */ }
       await sql`
         insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
         values (${uid}, ${chatId}, ${"idle"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
         on conflict (user_id, chat_id) do update set step = ${"idle"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
       `;
+      await tg(token, "sendMessage", {
+        chat_id: Number(chatId),
+        text: lang === "uz"
+          ? "Usta rejimidasiz. Buyurtmalar shu yerda.\nMijoz menyusi: «Men mijozman»."
+          : "Режим мастера. Заявки — здесь.\nМеню клиента и счёт: «Я клиент».",
+        reply_markup: markup(masterMenu(lang === "uz" ? "uz" : "ru", true)),
+      });
       await handleMasterMenu(sql, uid, token, chatId, "cmd:jobs");
       return { ok: true };
     }
@@ -3010,19 +3096,17 @@ export async function handleTelegramWebhook(hookId: string, secretHeader: string
     });
     return { ok: true };
   }
-  if ((tapGuess === "cmd:menu" || msg?.text === "/start") && !live) {
+  if (tapGuess === "cmd:menu" && !live) {
     if (cb?.data) await tg(token, "answerCallbackQuery", { callback_query_id: cb.id });
-    if (masterExists[0] && (draft.role === "master" || tapGuess === "cmd:menu" && step === "idle")) {
+    if (masterExists[0] && draft.role === "master") {
       const next = { ...draft, role: "master" as const };
       await sql`
         insert into as_tg_sessions (user_id, chat_id, step, draft, live_order_id, last_status, tg_name, updated_at)
         values (${uid}, ${chatId}, ${"idle"}, ${JSON.stringify(next)}, ${null}, ${sess[0]?.last_status ?? null}, ${name}, now())
         on conflict (user_id, chat_id) do update set step = ${"idle"}, draft = ${JSON.stringify(next)}, tg_name = ${name}, updated_at = now()
       `;
-      if (draft.role === "master") {
-        await handleMasterMenu(sql, uid, token, chatId, "cmd:jobs");
-        return { ok: true };
-      }
+      await handleMasterMenu(sql, uid, token, chatId, "cmd:jobs");
+      return { ok: true };
     }
     try { await persistProfile(sql, uid, chatId, name, { ...draft, role: "client" }); } catch { /* ignore */ }
     try {

@@ -19,7 +19,7 @@ const RU: Dict = {
   master: "Я мастер",
   welcome:
     "📍 Работаем по всему Узбекистану.\nСвободный мастер из вашего города назначается сам, по очереди.\n«Заявка»: комментарий, фото, точка на карте и телефон.",
-  help: "📝 Заявка — комментарий, фото, гео, телефон\n📦 Мои заявки — статус\n💰 Счёт — баланс\n🎁 Пригласить — своя ссылка и скидка\n👤 Профиль — данные\n💬 Оператор — чат с диспетчером",
+  help: "📝 Заявка — комментарий, фото, гео, телефон\n📦 Мои заявки — статус\n💰 Счёт — пополнение\n🎁 Пригласить — своя ссылка и скидка\n👤 Профиль — данные\n👨‍🔧 Я мастер — кабинет мастера\n💬 Оператор — чат с диспетчером",
   cancelDraft: "Черновик сброшен.",
   needService: "Нажмите кнопку или напишите, например: «течёт кран».",
   describe: "Напишите комментарий: что случилось и что нужно сделать.",
@@ -215,16 +215,16 @@ function masterMenuKeys(lang: Lang | undefined, online = true): KeyboardButton[]
       [{ id: "cmd:jobs", label: "📦 Buyurtmalar" }, { id: "cmd:mbalance", label: "💰 Balans" }],
       [{ id: "cmd:stats", label: "📊 Statistika" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
       [{ id: online ? "online:off" : "online:on", label: online ? "🔴 Oflayn" : "🟢 Onlayn" }, { id: "cmd:loc", label: "📍 Lokatsiya" }],
-      [{ id: "cmd:ref", label: "🎁 Taklif" }, { id: "cmd:profile", label: "👤 Profil" }],
-      [{ id: "role:client", label: "👤 Mijoz" }],
+      [{ id: "cmd:ref", label: "🎁 Taklif" }, { id: "cmd:mprofile", label: "👤 Kabinet" }],
+      [{ id: "role:client", label: "👤 Men mijozman" }],
     ];
   }
   return [
     [{ id: "cmd:jobs", label: "📦 Мои заявки" }, { id: "cmd:mbalance", label: "💰 Баланс" }],
     [{ id: "cmd:stats", label: "📊 Статистика" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
     [{ id: online ? "online:off" : "online:on", label: online ? "🔴 Офлайн" : "🟢 На линии" }, { id: "cmd:loc", label: "📍 Локация" }],
-    [{ id: "cmd:ref", label: "🎁 Пригласить" }, { id: "cmd:profile", label: "👤 Профиль" }],
-    [{ id: "role:client", label: "👤 Клиент" }],
+    [{ id: "cmd:ref", label: "🎁 Пригласить" }, { id: "cmd:mprofile", label: "👤 Кабинет" }],
+    [{ id: "role:client", label: "👤 Я клиент" }],
   ];
 }
 
@@ -254,7 +254,7 @@ function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
       [{ id: "cmd:myorders", label: "📦 Arizalarim" }, { id: "cmd:profile", label: "👤 Profil" }],
       [{ id: "cmd:balance", label: "💰 Hisob" }, { id: "cmd:support", label: "📞 Operator" }],
       [{ id: "cmd:ref", label: "🎁 Taklif" }, { id: "cmd:reviews", label: "⭐️ Izohlar" }],
-      [{ id: "cmd:become", label: "👨‍🔧 Usta bo‘lish" }],
+      [{ id: "cmd:become", label: "👨‍🔧 Men ustaman" }],
     ];
   }
   return [
@@ -262,7 +262,7 @@ function clientMenuKeys(lang: Lang | undefined): KeyboardButton[][] {
     [{ id: "cmd:myorders", label: "📦 Мои заявки" }, { id: "cmd:profile", label: "👤 Профиль" }],
     [{ id: "cmd:balance", label: "💰 Счёт" }, { id: "cmd:support", label: "📞 Оператор" }],
     [{ id: "cmd:ref", label: "🎁 Пригласить" }, { id: "cmd:reviews", label: "⭐️ Отзывы" }],
-    [{ id: "cmd:become", label: "👨‍🔧 Стать мастером" }],
+    [{ id: "cmd:become", label: "👨‍🔧 Я мастер" }],
   ];
 }
 
@@ -400,8 +400,8 @@ export function labelToTapId(raw: string): string | null {
   if (!q) return null;
   if (q === "русский") return "lang:ru";
   if (q.includes("zbek")) return "lang:uz";
-  if (q === fold(RU.client) || q === fold(UZ.client)) return "role:client";
-  if (q === fold(RU.master) || q === fold(UZ.master)) return "role:master";
+  if (q === fold(RU.client) || q === fold(UZ.client) || q === "клиент" || q === "mijoz") return "role:client";
+  if (q === fold(RU.master) || q === fold(UZ.master) || q === "мастер" || q === "usta") return "role:master";
   for (const lang of ["ru", "uz"] as Lang[]) {
     for (const row of allMenuRows(lang)) {
       for (const b of row) if (fold(b.label) === q) return b.id;
@@ -428,6 +428,7 @@ export function labelToTapId(raw: string): string | null {
   if (q.includes("локац") || q.includes("lokatsiya")) return "cmd:loc";
   if (q.includes("стать мастером") || q.includes("usta bo") || q === "мастер") return "cmd:become";
   if (q.includes("начать регистрац") || q.includes("регистрацию") || q.includes("ro'yxatdan") || q.includes("royxatdan")) return "role:master";
+  if (q.includes("кабинет") || q.includes("kabinet")) return "cmd:mprofile";
   if (q.includes("профиль") || q.includes("profil")) return "cmd:profile";
   if ((q.includes("доступ") || q.includes("kirish") || q.includes("баланс") || q.includes("balans")) && !q.includes("доступн")) return "cmd:balance";
   if (q.includes("цены") || q.includes("narxlar") || q.includes("narx va")) return "cmd:prices";
