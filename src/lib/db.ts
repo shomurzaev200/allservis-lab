@@ -279,8 +279,10 @@ if (typeof window === "undefined") {
     .then(async () => {
       try {
         const { resumeAllBots } = await import("./server/telegram");
+        const { startRetention } = await import("./server/retention");
         const sql = await getSql();
         await resumeAllBots(sql);
+        startRetention(sql);
       } catch (err) {
         console.error("[db] telegram pollers:", err);
       }
