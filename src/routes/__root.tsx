@@ -16,7 +16,7 @@ export const Route = createRootRoute({
       { name: "theme-color", content: "#070B14" },
       {
         name: "description",
-        content: "All Servis — вызов мастера. Администратор назначает мастера вручную.",
+        content: "All Servis — вызов мастера по Узбекистану. Свободный мастер из того же города назначается сам.",
       },
     ],
     links: [

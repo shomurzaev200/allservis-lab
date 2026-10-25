@@ -60,7 +60,7 @@ async function submitDraft(get: () => State, set: (p: Partial<State>) => void, d
         phone: draft.phone,
         category: svc.id,
         description: draft.problem,
-        district: draft.neighborhood || draft.city || "Бекабад",
+        district: draft.neighborhood || draft.city || "",
         lat: draft.lat,
         lng: draft.lng,
         comment: draft.comment,

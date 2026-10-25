@@ -124,7 +124,8 @@ export function AssignDialog({
                   <p className="mt-1 text-xs text-accent">
                     {m.km != null ? `${m.km} км от клиента` : "нет координат"}
                     {m.recommended ? " · рекомендуется" : ""}
-                    {"inZone" in m && m.inZone === false ? " · вне Бекабада" : ""}
+                    {"sameCity" in m && m.sameCity === false ? " · другой город" : ""}
+                    {"inZone" in m && m.inZone === false ? " · вне Узбекистана" : ""}
                   </p>
                 </div>
                 <OnlineDot status={m.online_status} />

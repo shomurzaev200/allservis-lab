@@ -16,7 +16,7 @@ const EVENT_LABEL: Record<string, string> = {
   created: "Заявка создана",
   geo: "Получена геолокация",
   photos: "Фотографии",
-  assigned: "Администратор назначил мастера",
+  assigned: "Мастер назначен",
   master_accepted: "Мастер принял заказ",
   master_rejected: "Мастер отказался",
   enroute: "Мастер выехал",
@@ -121,7 +121,7 @@ function OrderPage() {
           <p className="mt-1 text-sm leading-relaxed">{o.description}</p>
           {o.comment ? <p className="mt-2 text-sm text-muted">Комментарий: {o.comment}</p> : null}
           <p className="mt-2 text-xs text-muted">
-            🏙 {o.city || "Бекабад"}
+            🏙 {o.city || "город не указан"}
             <br />
             📍 Район/махалля: {o.district || "не определён"}
             <br />

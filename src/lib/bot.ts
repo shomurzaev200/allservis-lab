@@ -3,7 +3,7 @@ import type { ChatMessage, ChatStep, Draft, KeyboardButton, Lang, UserRole } fro
 import { formatPhone, formatSum, isValidUzPhone, nowTime, uid } from "./utils";
 import { clientLabel } from "./domain";
 import type { OrderStatus } from "./domain";
-import { isInsideServiceArea, SERVICE_CITY } from "./geo";
+import { cityFromCoords, isInsideServiceArea } from "./geo";
 import { formatBecomeMaster, formatHowTo, formatOpError, formatPrices, svcTitle } from "./tg-ui";
 
 export const BOT_NAME = "All Servis";
@@ -13,12 +13,12 @@ const STATIC_TIME = "12:40";
 type Dict = Record<string, string>;
 
 const RU: Dict = {
-  pickLang: "👋 Добро пожаловать в ALL SERVIS!\n🔧 Вызов мастера на дом\n📍 Мы работаем только в городе Бекабад.\n\nВыберите язык / Tilni tanlang.",
+  pickLang: "👋 Добро пожаловать в ALL SERVIS!\n🔧 Вызов мастера на дом\n📍 Работаем по всему Узбекистану.\n\nВыберите язык / Tilni tanlang.",
   pickRole: "Кто вы?",
   client: "Я клиент",
   master: "Я мастер",
   welcome:
-    "📍 Работаем только в Бекабаде.\nЗаявку видит администратор. Мастера система сама не назначает.\nВыберите услугу или напишите, что случилось.",
+    "📍 Работаем по всему Узбекистану.\nСвободный мастер из вашего города назначается сам, по очереди.\nВыберите услугу или напишите, что случилось.",
   help: "🛠 Вызвать мастера — заявка\n📋 Мои заявки — статус\n👤 Профиль — данные и ссылка\n💬 Поддержка — диспетчер",
   cancelDraft: "Черновик сброшен.",
   needService: "Нажмите кнопку или напишите, например: «течёт кран».",
@@ -30,14 +30,14 @@ const RU: Dict = {
   enoughPhoto: "Три фото достаточно. Отправьте геолокацию — без точки на карте заявку не примем.",
   askGeo: "📍 Чтобы понять, можем ли мы обслужить адрес, отправьте геолокацию.",
   shareGeo: "📍 Отправить геолокацию",
-  geoOk: "Геолокация в Бекабаде. Отправьте номер телефона кнопкой.",
+  geoOk: "Геолокация принята. Отправьте номер телефона кнопкой.",
   districtOk: "Нужна точная точка на карте — район вручную не принимаем.",
   skipGeo: "Нужна геолокация",
   keepGeo: "✅ Не менять локацию",
   newGeo: "📍 Отправить новую",
   askKeepGeo: "Локация с прошлого раза. Отправить новую точку или не менять?",
   pickDistrict: "Нажмите «Отправить геолокацию».",
-  outsideArea: "📍 К сожалению, ALL SERVIS сейчас работает только в городе Бекабад.\nМы пока не работаем в этой территории.",
+  outsideArea: "📍 Эта точка за пределами Узбекистана.\nМы работаем по всей стране.",
   sharePhone: "📱 Отправить номер",
   needPhone: "❌ НЕВЕРНЫЙ НОМЕР\n\nНужен ваш телефон.\nНажмите «📱 Отправить номер»\nили введите +998 XX XXX XX XX.\n\nМинус, плюс без цифр и чужой текст — отказ.",
   commentAsk: "Комментарий для мастера — или пропустите.",
@@ -47,7 +47,7 @@ const RU: Dict = {
   confirmHint: "Нажмите «Подтвердить» или «Изменить».",
   restart: "Начнём заново. Выберите услугу.",
   missing: "Данных не хватает. /start",
-  live: "Заявка у диспетчера. Статус придёт сюда.",
+  live: "Заявка в работе. Статус придёт сюда.",
   startHint: "Чтобы вызвать мастера — нажмите «Вызвать мастера».",
   thanksRate: "Спасибо. Оценка ушла администратору.",
   askReview: "Можете написать отзыв текстом или нажать меню.",
@@ -56,21 +56,21 @@ const RU: Dict = {
   menu: "Меню",
   masterSpec: "Какая специальность?",
   masterPhone: "Отправьте номер — по нему с вами свяжется диспетчер.",
-  masterGeo: "Отправьте геолокацию в Бекабаде — так вы отобразитесь на карте.",
+  masterGeo: "Отправьте геолокацию. Заявки будут только из вашего города.",
   masterDone: "Профиль мастера сохранён. Онлайн/офлайн — кнопками. Админ видит вас в панели.",
   goOnline: "Я онлайн",
   goOffline: "Я офлайн",
-  nowOnline: "Вы на линии. Новые назначения придут сюда.",
+  nowOnline: "Вы на линии. Заявки только из вашего города, по очереди.",
   nowOffline: "Вы офлайн. Заявки не будут предлагать в первую очередь.",
 };
 
 const UZ: Dict = {
-  pickLang: "👋 ALL SERVIS ga xush kelibsiz!\n🔧 Uyga usta chaqirish\n📍 Hozir faqat Bekobod shahrida ishlaymiz.\n\nTilni tanlang / Выберите язык.",
+  pickLang: "👋 ALL SERVIS ga xush kelibsiz!\n🔧 Uyga usta chaqirish\n📍 Butun O‘zbekistonda ishlaymiz.\n\nTilni tanlang / Выберите язык.",
   pickRole: "Siz kimsiz?",
   client: "Men mijozman",
   master: "Men ustaman",
   welcome:
-    "📍 Faqat Bekobodda ishlaymiz.\nArizani administrator ko‘radi. Tizim ustani o‘zi tayinlamaydi.\nXizmatni tanlang yoki nima bo‘lganini yozing.",
+    "📍 Butun O‘zbekiston.\nBo‘sh usta shu shahardan o‘zi, navbat bilan tayinlanadi.\nXizmatni tanlang yoki nima bo‘lganini yozing.",
   help: "🛠 Usta chaqirish — ariza\n📋 Arizalarim — status\n👤 Profil — ma’lumot va havola\n💬 Yordam — dispatcher",
   cancelDraft: "Qoralama tozalandi.",
   needService: "Tugmani bosing yoki yozing, masalan: «kran oqayapti».",
@@ -82,14 +82,14 @@ const UZ: Dict = {
   enoughPhoto: "Uchta foto yetarli. Geolokatsiya yuboring — nuqtasiz ariza olmaymiz.",
   askGeo: "📍 Xizmat ko‘rsata olishimiz uchun geolokatsiyani yuboring.",
   shareGeo: "📍 Geolokatsiya yuborish",
-  geoOk: "Joylashuv Bekobodda. Telefon raqamini tugma orqali yuboring.",
+  geoOk: "Joylashuv qabul qilindi. Telefon raqamini tugma orqali yuboring.",
   districtOk: "Aniq nuqta kerak — tuman qo‘lda qabul qilinmaydi.",
   skipGeo: "Geolokatsiya kerak",
   keepGeo: "✅ O‘zgartirmaslik",
   newGeo: "📍 Yangi lokatsiya",
   askKeepGeo: "Oxirgi lokatsiya saqlangan. Yangisini yuborasizmi yoki qoldiramizmi?",
   pickDistrict: "«Geolokatsiya yuborish» ni bosing.",
-  outsideArea: "📍 Afsuski, ALL SERVIS hozir faqat Bekobod shahrida ishlaydi.\nBu hududda hozir ishlamaymiz.",
+  outsideArea: "📍 Nuqta O‘zbekistondan tashqarida.\nBiz butun mamlakatda ishlaymiz.",
   sharePhone: "📱 Raqamni yuborish",
   needPhone: "❌ NOTO‘G‘RI RAQAM\n\nO‘z telefoningiz kerak.\n«📱 Raqamni yuborish» ni bosing\nyoki +998 XX XXX XX XX yozing.\n\nMinus, plus yoki boshqa matn — rad.",
   commentAsk: "Usta uchun izoh — yoki o‘tkazing.",
@@ -99,7 +99,7 @@ const UZ: Dict = {
   confirmHint: "«Tasdiqlash» yoki «O‘zgartirish».",
   restart: "Qaytadan. Xizmatni tanlang.",
   missing: "Ma’lumot yetarli emas. /start",
-  live: "Ariza dispatcherga ketdi. Status shu yerga keladi.",
+  live: "Ariza jarayonda. Status shu yerga keladi.",
   startHint: "Usta chaqirish uchun «Usta chaqirish» ni bosing.",
   thanksRate: "Rahmat. Baholash adminga ketdi.",
   askReview: "Matnli izoh yozishingiz yoki menyuni bosishingiz mumkin.",
@@ -108,7 +108,7 @@ const UZ: Dict = {
   menu: "Menyu",
   masterSpec: "Mutaxassislik?",
   masterPhone: "Raqamingizni yuboring — dispatcher shu orqali bog‘lanadi.",
-  masterGeo: "Bekoboddan geolokatsiya yuboring — xaritada ko‘rinasiz.",
+  masterGeo: "Geolokatsiya yuboring. Buyurtmalar faqat shu shahardan keladi.",
   masterDone: "Usta profili saqlandi. Onlayn/oflayn — tugmalar. Admin sizni panelda ko‘radi.",
   goOnline: "Men onlaynman",
   goOffline: "Men oflaynman",
@@ -355,12 +355,13 @@ export type BotResult = {
 
 function applyLocation(draft: Draft, lat: number, lng: number): Draft {
   const inside = isInsideServiceArea(lat, lng);
+  const city = cityFromCoords(lat, lng) || (inside ? draft.city || "" : draft.city);
   return {
     ...draft,
     lat,
     lng,
-    districtId: inside ? "bekabad" : undefined,
-    city: inside ? SERVICE_CITY : draft.city,
+    districtId: undefined,
+    city: inside ? city || draft.city : draft.city,
   };
 }
 
@@ -368,8 +369,8 @@ function summary(d: Draft): string {
   const lang = d.lang;
   const svc = d.serviceId ? serviceById(d.serviceId) : undefined;
   const svcTitle = svc ? (lang === "uz" ? SVC_UZ[svc.id] : svc.title) : "—";
-  const city = d.city || SERVICE_CITY;
-  const area = d.neighborhood || d.fullAddress || (lang === "uz" ? "Bekobod" : SERVICE_CITY);
+  const city = d.city || (lang === "uz" ? "O‘zbekiston" : "Узбекистан");
+  const area = d.neighborhood || d.fullAddress || "—";
   const lines =
     lang === "uz"
       ? [
@@ -783,7 +784,9 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     return {
       userMessage: user(lang === "uz" ? "Yordam" : "Поддержка"),
       replies: [bot(
-        lang === "uz" ? "Savolingizni yozing — dispatcher siz bilan bog‘lanadi." : "Напишите вопрос — диспетчер свяжется с вами.",
+        lang === "uz"
+          ? "Yozing. Xabar operatorga ketadi, javob shu chatga qaytadi."
+          : "Напишите сообщение. Оно уйдёт оператору, ответ придёт в этот чат.",
         { buttons: step === "live" ? liveMenuKeys(lang) : clientMenuKeys(lang) },
       )],
       step: "support",
@@ -938,7 +941,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
           draft: { ...draft, districtId: undefined },
         };
       }
-      return afterKeepGeo({ ...draft, districtId: "bekabad", city: SERVICE_CITY }, lang, user(t(lang, "keepGeo")));
+      return afterKeepGeo(draft, lang, user(t(lang, "keepGeo")));
     }
     if (tapId === "geo:new") {
       return {
@@ -968,7 +971,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
           draft,
         };
       }
-      return afterKeepGeo({ ...draft, districtId: "bekabad", city: SERVICE_CITY }, lang, user(lang === "uz" ? "To‘g‘ri" : "Всё верно"));
+      return afterKeepGeo(draft, lang, user(lang === "uz" ? "To‘g‘ri" : "Всё верно"));
     }
     if (tapId === "geo:skip" || tapId.startsWith("dist:")) {
       return {
@@ -1124,16 +1127,29 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
 
   if (step === "support") {
     if (tapId.startsWith("cmd:") || tapId.startsWith("svc:") || tapId.startsWith("role:") || tapId.startsWith("lang:")) {
-      /* handled above or below */
+      /* commands above already returned */
     } else if (raw) {
       return {
         userMessage: user(raw),
-        replies: [bot(lang === "uz" ? "Dispatcher siz bilan bog‘lanadi." : "Передал. Диспетчер свяжется с вами.", { buttons: clientMenuKeys(lang) })],
-        step: "category",
+        replies: [bot(
+          lang === "uz"
+            ? "Yubordim. Javob shu chatga keladi. Yana yozishingiz mumkin."
+            : "Отправил оператору. Ответ придёт в этот чат. Можно писать ещё.",
+          { buttons: clientMenuKeys(lang) },
+        )],
+        step: "support",
         draft,
         supportText: raw,
       };
     }
+    return {
+      replies: [bot(
+        lang === "uz" ? "Xabar yozing — operator javob beradi." : "Напишите сообщение — оператор ответит здесь.",
+        { buttons: clientMenuKeys(lang) },
+      )],
+      step: "support",
+      draft,
+    };
   }
 
   if (step === "rate") {
@@ -1171,7 +1187,7 @@ export function reduceBot(step: ChatStep, draft: Draft, event: BotEvent): BotRes
     if (raw && !tapId.startsWith("cmd:") && !tapId.startsWith("rate:")) {
       return {
         userMessage: user(raw),
-        replies: [bot(lang === "uz" ? "Dispatcher siz bilan bog‘lanadi." : "Передал. Диспетчер свяжется с вами.", { buttons: liveMenuKeys(lang) })],
+        replies: [bot(lang === "uz" ? "Operatorga yubordim. Javob shu yerga keladi." : "Отправил оператору. Ответ придёт сюда.", { buttons: liveMenuKeys(lang) })],
         step: "live",
         draft,
         supportText: raw,

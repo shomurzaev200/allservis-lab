@@ -68,15 +68,15 @@ export function formatSum(n: number): string {
 export function clientLabel(status: OrderStatus): string {
   switch (status) {
     case "waiting_admin":
-      return "Администратор подбирает мастера";
+      return "Ищем свободного мастера в вашем городе";
     case "assigned":
       return "Мастер назначен — ожидает подтверждения";
     case "master_accepted":
       return "Мастер принял заявку";
     case "master_rejected":
-      return "Мастер отказался. Администратор назначит другого";
+      return "Мастер отказался. Ищем следующего в этом городе";
     case "enroute":
-      return "Мастер выехал к вам";
+      return "Мастер едет к вам";
     case "arrived":
       return "Мастер на месте";
     case "in_progress":

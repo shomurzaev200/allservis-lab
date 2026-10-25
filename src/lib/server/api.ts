@@ -3,10 +3,10 @@ import { authMiddleware } from "@/lib/auth/middleware";
 import { getSql } from "@/lib/db";
 import { SERVICES } from "@/lib/catalog";
 import { ASSIGNABLE, haversineKm, clientLabel, type OrderStatus, type OnlineStatus } from "@/lib/domain";
-import { isInsideServiceArea } from "@/lib/geo";
+import { assignmentCity, isInsideServiceArea } from "@/lib/geo";
 import { addAudit, addEvent, addNote, accruePayout, parkPayout, tickPresence, type StaffWho } from "./workspace";
 import { insertOrder, type CreateOrderInput } from "./orders";
-import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting } from "./telegram";
+import { connectTelegramBot, connectExtraBot, disconnectTelegramBot, disconnectBotById, pushOrderStatus, sendWorkspaceAlertTest, normalizeChatId, channelOverlap, sanitizeAlertRouting, dispatchOrder, dispatchWaiting } from "./telegram";
 import { actorCtx, requireAdmin, requireOwner, can } from "./access";
 
 async function ctxSql(userId: string) {
@@ -424,13 +424,16 @@ export const candidatesForOrder = createServerFn({ method: "GET" })
     const olat = o[0].lat == null ? null : n(o[0].lat);
     const olng = o[0].lng == null ? null : n(o[0].lng);
     const spec = String(o[0].category_slug);
+    const orderCity = assignmentCity(String(o[0].city ?? ""), olat, olng);
     const scored = masters.map((m) => {
       const km = olat != null && olng != null && m.lat != null && m.lng != null ? haversineKm(olat, olng, m.lat, m.lng) : null;
       const inZone = m.lat != null && m.lng != null ? isInsideServiceArea(m.lat, m.lng) : false;
-      const recommended = inZone && m.specialization === spec && m.online_status !== "offline" && m.online_status !== "blocked" && m.active_orders < 3;
-      return { ...m, km, recommended, inZone };
+      const sameCity = Boolean(orderCity && assignmentCity(m.city, m.lat, m.lng) === orderCity);
+      const recommended = sameCity && m.specialization === spec && m.online_status !== "offline" && m.online_status !== "blocked" && m.active_orders < 1;
+      return { ...m, km, recommended, inZone, sameCity };
     });
     scored.sort((a, b) => {
+      if (a.sameCity !== b.sameCity) return a.sameCity ? -1 : 1;
       if (a.recommended !== b.recommended) return a.recommended ? -1 : 1;
       if (a.km != null && b.km != null) return a.km - b.km;
       return b.rating - a.rating;
@@ -453,6 +456,13 @@ export const assignMaster = createServerFn({ method: "POST" })
     const master = m[0] as Record<string, unknown> | undefined;
     if (!master) return { success: false as const, error: "MASTER_NOT_FOUND" };
     if (String(master.online_status) === "blocked") return { success: false as const, error: "MASTER_BLOCKED" };
+    const busy = await sql<{ id: number }>`
+      select id from as_orders
+      where user_id = ${uid} and master_id = ${data.masterId} and id <> ${data.orderId}
+        and status in ('assigned', 'master_accepted', 'enroute', 'arrived', 'in_progress')
+      limit 1
+    `;
+    if (busy[0]) return { success: false as const, error: "У мастера уже есть незакрытая заявка" };
     const updated = await sql<{ id: number }>`
       update as_orders
       set master_id = ${data.masterId}, status = 'assigned', assigned_at = now(), updated_at = now(), assigned_by = ${actor.email}
@@ -466,6 +476,7 @@ export const assignMaster = createServerFn({ method: "POST" })
     const name = `${master.first_name} ${master.last_name}`;
     await addNote(sql, uid, "master", `Вам назначен заказ №${order.public_no}`, String(order.description), data.orderId, data.masterId);
     await pushOrderStatus(sql, uid, data.orderId, "assigned", name);
+    try { await sql`update as_masters set last_offered_at = now() where user_id = ${uid} and id = ${data.masterId}`; } catch { /* 0015 */ }
     return { success: true as const, error: null, masterName: name };
   });
 
@@ -487,6 +498,7 @@ export const cancelOrder = createServerFn({ method: "POST" })
     if (!updated[0]) return { success: false as const, error: "Заявку уже закрыли" };
     await addEvent(sql, uid, orderId, "cancelled", "admin", { reason }, who(actor));
     await pushOrderStatus(sql, uid, orderId, "cancelled", null);
+    try { await dispatchWaiting(sql, uid); } catch { /* queue */ }
     return { success: true };
   });
 
@@ -659,7 +671,12 @@ export const createOrder = createServerFn({ method: "POST" })
   .validator((d: CreateOrderInput) => d)
   .handler(async ({ context, data }) => {
     const { sql, uid, actor } = await ctxSql(context.userId);
-    return insertOrder(sql, uid, data);
+    const created = await insertOrder(sql, uid, data);
+    try {
+      const hit = await dispatchOrder(sql, uid, created.id);
+      if (hit) return { ...created, status: "assigned" as const };
+    } catch { /* bot may be offline */ }
+    return created;
   });
 
 export const rateOrder = createServerFn({ method: "POST" })

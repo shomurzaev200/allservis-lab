@@ -6,17 +6,23 @@ import { OnlineDot, OrderBadge } from "./status-badge";
 import { serviceById } from "@/lib/catalog";
 import { DISTRICTS } from "@/lib/catalog";
 import { cn } from "@/lib/utils";
-import { isInsideServiceArea, SERVICE_CITY } from "@/lib/geo";
+import { isInsideServiceArea } from "@/lib/geo";
 
-const SOUTH = 40.175;
-const NORTH = 40.265;
-const WEST = 69.195;
-const EAST = 69.340;
-
-function xy(lat: number, lng: number) {
-  const x = ((lng - WEST) / (EAST - WEST)) * 100;
-  const y = ((NORTH - lat) / (NORTH - SOUTH)) * 100;
-  return { x: Math.min(98, Math.max(2, x)), y: Math.min(98, Math.max(2, y)) };
+function boundsOf(points: { lat: number; lng: number }[]) {
+  if (!points.length) return { south: 37.2, north: 45.5, west: 56, east: 73.1 };
+  let south = 90;
+  let north = -90;
+  let west = 180;
+  let east = -180;
+  for (const p of points) {
+    south = Math.min(south, p.lat);
+    north = Math.max(north, p.lat);
+    west = Math.min(west, p.lng);
+    east = Math.max(east, p.lng);
+  }
+  const latPad = Math.max(0.08, (north - south) * 0.35);
+  const lngPad = Math.max(0.08, (east - west) * 0.35);
+  return { south: south - latPad, north: north + latPad, west: west - lngPad, east: east + lngPad };
 }
 
 export function MapCanvas({
@@ -31,6 +37,16 @@ export function MapCanvas({
   const selectedMaster = sel?.type === "master" ? masters.find((m) => m.id === sel.id) : null;
   const waiting = orders.filter((o) => o.status === "waiting_admin" || o.status === "master_rejected");
   const online = masters.filter((m) => m.online_status === "online" || m.online_status === "busy");
+  const pts = [
+    ...orders.filter((o) => o.lat != null && o.lng != null && isInsideServiceArea(o.lat, o.lng)).map((o) => ({ lat: o.lat as number, lng: o.lng as number })),
+    ...masters.filter((m) => m.lat != null && m.lng != null && isInsideServiceArea(m.lat, m.lng)).map((m) => ({ lat: m.lat as number, lng: m.lng as number })),
+  ];
+  const box = boundsOf(pts);
+  const xy = (lat: number, lng: number) => {
+    const x = ((lng - box.west) / (box.east - box.west)) * 100;
+    const y = ((box.north - lat) / (box.north - box.south)) * 100;
+    return { x: Math.min(98, Math.max(2, x)), y: Math.min(98, Math.max(2, y)) };
+  };
 
   const lines = orders
     .filter((o) => o.master_id && o.lat != null && o.lng != null)
@@ -45,18 +61,18 @@ export function MapCanvas({
     <div className="grid gap-4 xl:grid-cols-[1fr_22rem]">
       <div className="relative min-h-[32rem] overflow-hidden rounded-xl border border-border bg-surface">
         <iframe
-          title={SERVICE_CITY}
+          title="Узбекистан"
           className="pointer-events-none absolute inset-0 size-full opacity-55 grayscale contrast-125"
-          src={`https://www.openstreetmap.org/export/embed.html?bbox=${WEST}%2C${SOUTH}%2C${EAST}%2C${NORTH}&layer=mapnik`}
+          src={`https://www.openstreetmap.org/export/embed.html?bbox=${box.west}%2C${box.south}%2C${box.east}%2C${box.north}&layer=mapnik`}
         />
         <div className="absolute inset-0 bg-bg/35" />
-        <p className="absolute left-3 top-3 z-10 font-mono text-xs text-accent">БЕКАБАД · OSM LIVE</p>
+        <p className="absolute left-3 top-3 z-10 font-mono text-xs text-accent">УЗБЕКИСТАН · OSM</p>
         <svg className="absolute inset-0 z-[1] size-full" viewBox="0 0 100 100" preserveAspectRatio="none">
           {lines.map((l) => (
             <line key={l.o.id} x1={l.a.x} y1={l.a.y} x2={l.b.x} y2={l.b.y} stroke="rgb(34 211 238 / 0.7)" strokeWidth="0.4" />
           ))}
         </svg>
-        {DISTRICTS.map((d) => {
+        {DISTRICTS.filter((d) => d.lat >= box.south && d.lat <= box.north && d.lng >= box.west && d.lng <= box.east).map((d) => {
           const p = xy(d.lat, d.lng);
           return (
             <span
@@ -120,7 +136,7 @@ export function MapCanvas({
         <div className="glass-card rounded-xl p-4">
           {!sel ? (
             <div className="space-y-3 text-sm text-muted">
-              <p>Клиент → заявка → администратор → мастер. Линия появляется только после назначения.</p>
+              <p>Заявка уходит свободному мастеру из того же города. Линия — после назначения.</p>
               <ul className="space-y-1 text-xs">
                 <li className="flex items-center gap-2"><span className="size-2 rounded-sm bg-ok" /> Онлайн мастер</li>
                 <li className="flex items-center gap-2"><span className="size-2 rounded-sm bg-warn" /> Занят</li>

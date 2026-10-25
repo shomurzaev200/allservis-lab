@@ -1,6 +1,5 @@
 import { SERVICES, serviceById } from "./catalog";
 import { formatSum } from "./domain";
-import { isInsideServiceArea, isTashkentDistrictName, SERVICE_CITY } from "./geo";
 
 export const HR = "━━━━━━━━━━━━━━━━";
 
@@ -29,19 +28,13 @@ export function svcTitle(id: string, lang: "ru" | "uz" = "ru"): string {
 
 export function displayArea(
   district: string | null | undefined,
-  lat?: number | null,
-  lng?: number | null,
+  _lat?: number | null,
+  _lng?: number | null,
   lang: "ru" | "uz" = "ru",
 ): string {
   const unk = lang === "uz" ? "aniqlanmadi" : "не определён";
   const raw = (district ?? "").trim();
-  const inside = lat != null && lng != null && isInsideServiceArea(Number(lat), Number(lng));
-  if (!raw || isTashkentDistrictName(raw)) {
-    return inside ? SERVICE_CITY : unk;
-  }
-  if (/ташкент|toshkent|tashkent/i.test(raw) && !/бекабад|bekobod|bekabad/i.test(raw)) {
-    return inside ? SERVICE_CITY : unk;
-  }
+  if (!raw) return unk;
   return raw;
 }
 
@@ -72,9 +65,9 @@ export function statusLine(status: string, lang: "ru" | "uz" = "ru"): string {
 }
 
 export function formatClientHome(opts: {
-  name: string; city?: string; balance: number; lang: "ru" | "uz";
+  name: string; city?: string; balance?: number; lang: "ru" | "uz";
 }): string {
-  const city = opts.city || SERVICE_CITY;
+  const city = opts.city || (opts.lang === "uz" ? "O‘zbekiston" : "Узбекистан");
   const n = opts.name.split(" ")[0] || opts.name;
   if (opts.lang === "uz") {
     return [
@@ -84,7 +77,7 @@ export function formatClientHome(opts: {
       `Xush kelibsiz, ${n}! 👋`,
       "",
       `📍 ${city}`,
-      `💰 Balans: ${formatSum(opts.balance)}`,
+      "💳 Ustaga joyida to‘laysiz",
       "",
       "Qanday yordam bera olamiz?",
       "Pastdagi tugmani tanlang.",
@@ -97,7 +90,7 @@ export function formatClientHome(opts: {
     `Добро пожаловать, ${n}! 👋`,
     "",
     `📍 ${city}`,
-    `💰 Баланс: ${formatSum(opts.balance)}`,
+    "💳 Мастеру платите на месте",
     "",
     "Чем можем помочь?",
     "👇 Выберите действие",
@@ -127,7 +120,7 @@ export function formatHowTo(lang: "ru" | "uz"): string {
       "",
       "1️⃣ Ariza yaratasiz",
       "2️⃣ 📍 Joylashuv yuborasiz",
-      "3️⃣ 👨‍💼 Dispatcher ustani tanlaydi",
+      "3️⃣ 👨‍🔧 Bo‘sh usta shu shahardan o‘zi tayinlanadi",
       "4️⃣ 👨‍🔧 Usta arizani oladi",
       "5️⃣ ✅ Usta tasdiqlaydi",
       "6️⃣ 🚗 Usta keladi",
@@ -140,7 +133,7 @@ export function formatHowTo(lang: "ru" | "uz"): string {
     "",
     "1️⃣ Вы создаёте заявку",
     "2️⃣ 📍 Отправляете местоположение",
-    "3️⃣ 👨‍💼 Диспетчер выбирает мастера",
+    "3️⃣ 👨‍🔧 Свободный мастер из вашего города назначается сам",
     "4️⃣ 👨‍🔧 Мастер получает заявку",
     "5️⃣ ✅ Мастер подтверждает заказ",
     "6️⃣ 🚗 Мастер приезжает",
@@ -163,7 +156,7 @@ export function formatBecomeMaster(lang: "ru" | "uz"): string {
       "✅ reyting va izohlar",
       "✅ ALL SERVIS orqali daromad",
       "",
-      `📍 Hozir faqat ${SERVICE_CITY}.`,
+      "📍 Butun O‘zbekiston. Buyurtma faqat siz turgan shahardan keladi.",
     ].join("\n");
   }
   return [
@@ -178,7 +171,7 @@ export function formatBecomeMaster(lang: "ru" | "uz"): string {
     "✅ рейтинг и отзывы",
     "✅ зарабатывать через ALL SERVIS",
     "",
-    `📍 Работаем сейчас только в городе ${SERVICE_CITY}.`,
+    "📍 Работаем по всему Узбекистану. Заявки приходят только из вашего города.",
   ].join("\n");
 }
 

@@ -57,7 +57,7 @@ function OrdersPage() {
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl">Заявки</h1>
-          <p className="text-sm text-muted">Назначение мастера — только вручную.</p>
+          <p className="text-sm text-muted">Свободный мастер из того же города назначается сам, по очереди. Вручную — если нужно заменить.</p>
         </div>
         <Input
           value={q}
